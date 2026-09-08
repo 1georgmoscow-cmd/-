@@ -5,7 +5,7 @@ namespace LabelPrint;
 
 use LabelPrint\Db\Db;
 use LabelPrint\Model\ProfileRegistry;
-use LabelPrint\Pdf\Rasterizer;
+use LabelPrint\Pdf\RasterizerFactory;
 use LabelPrint\Queue\JobRepository;
 use LabelPrint\Render\ZplLabelBuilder;
 use LabelPrint\Storage\LabelRepository;
@@ -23,6 +23,7 @@ final class App
     private ?Db $db = null;
     private ?Log $log = null;
     private ?ProfileRegistry $profiles = null;
+    private ?RasterizerFactory $rasterizers = null;
 
     private function __construct(public readonly Config $config)
     {
@@ -70,23 +71,16 @@ final class App
         return new LabelRepository($this->db());
     }
 
-    public function rasterizer(): Rasterizer
+    public function rasterizers(): RasterizerFactory
     {
-        return new Rasterizer(
-            ghostscript: $this->config->string('ghostscript', '/usr/bin/gs'),
-            log: $this->log('raster'),
-            timeoutSeconds: $this->config->int('render.timeout', 30),
-            grayscaleThreshold: $this->config->bool('render.grayscale_threshold', true),
-            antialias: $this->config->int('render.antialias', 4),
-            maxDots: $this->config->int('render.max_dots', 40_000_000),
-        );
+        return $this->rasterizers ??= new RasterizerFactory($this->config, $this->log('raster'));
     }
 
     public function renderer(): RenderService
     {
         return new RenderService(
             pdfDir: $this->config->string('pdf_dir'),
-            rasterizer: $this->rasterizer(),
+            rasterizers: $this->rasterizers(),
             builder: new ZplLabelBuilder($this->config->bool('render.verify_roundtrip', true)),
             labels: $this->labels(),
             files: $this->files(),

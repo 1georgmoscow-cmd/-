@@ -21,11 +21,21 @@ return [
     // Путь к Ghostscript. Проверить: which gs
     'ghostscript' => '/usr/bin/gs',
 
+    // Путь к mutool из пакета mupdf-tools (apt install mupdf-tools).
+    'mutool' => '/usr/bin/mutool',
+
     // Необязательно: pdfinfo/pdfimages из poppler-utils ускоряют разбор PDF.
     'pdfinfo' => '/usr/bin/pdfinfo',
 
     'render' => [
-        // Жёсткий таймаут на один вызов Ghostscript, секунды.
+        // Движок растеризации:
+        //   ghostscript — по умолчанию, есть везде, около 57 мс на страницу при 203 dpi
+        //   mupdf       — примерно впятеро быстрее (около 10 мс), нужен пакет mupdf-tools,
+        //                 но строже относится к повреждённым PDF
+        //   auto        — mupdf, если установлен, иначе ghostscript
+        // Значение можно переопределить в отдельном профиле ключом 'engine'.
+        'engine' => 'ghostscript',
+        // Жёсткий таймаут на один вызов растеризатора, секунды.
         'timeout' => 30,
         // Рендерить в 8-битный серый и бинаризовать самим (точный контроль порога,
         // штрихкоды не размываются полутоном). false — просить у gs сразу 1 бит.

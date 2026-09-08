@@ -285,6 +285,25 @@ return [
         assertTrue(!str_contains($builder->build($bitmap, PrinterProfile::fromArray('d', [])), '^MM'));
     },
 
+    'неизвестный движок растеризации отвергается' => static function (): void {
+        try {
+            PrinterProfile::fromArray('bad', ['engine' => 'imagemagick']);
+            throw new RuntimeException('ожидалось исключение');
+        } catch (InvalidArgumentException $e) {
+            assertContains('engine', $e->getMessage());
+        }
+    },
+
+    'движок входит в отпечаток профиля' => static function (): void {
+        // Движки дают чуть разный растр, поэтому смена движка обязана
+        // помечать готовый ZPL устаревшим.
+        $base = ['dpi' => 203, 'width_mm' => 100, 'height_mm' => 150];
+        $gs = PrinterProfile::fromArray('a', $base + ['engine' => 'ghostscript']);
+        $mu = PrinterProfile::fromArray('a', $base + ['engine' => 'mupdf']);
+
+        assertTrue($gs->fingerprint() !== $mu->fingerprint());
+    },
+
     'неизвестный режим печати отвергается' => static function (): void {
         try {
             PrinterProfile::fromArray('bad', ['print_mode' => 'guillotine']);

@@ -6,43 +6,37 @@ namespace LabelPrint\Pdf;
 use LabelPrint\Support\Log;
 
 /**
- * Растеризация PDF через Ghostscript.
+ * Общая часть растеризаторов, читающих формат Netpbm из stdout внешней программы.
  *
- * Два принципиальных решения:
- *
- * 1. Рендерим в 8-битный серый (pgmraw) и бинаризуем сами, а не просим у Ghostscript
- *    готовый 1 бит (pbmraw). На однобитном устройстве gs применяет полутоновое
- *    растрирование: растровые изображения превращаются в «сеточку» из точек. Для глаза
- *    это выглядит нормально, но штрихкод после такой обработки сканер не читает.
- *    Свой порог даёт чистые чёрно-белые штрихи.
- *
- * 2. Все страницы рендерятся ОДНИМ вызовом gs, а результат читается из stdout.
- *    Запуск процесса стоит 80-150 мс — это самая дорогая часть конвейера, и платить
- *    её за каждую страницу нет смысла. Netpbm-файлы самоописываемы, поэтому склеенный
- *    поток разбирается последовательно.
+ * Все страницы рендерятся ОДНИМ вызовом, результат приходит склеенным потоком.
+ * Запуск процесса — самая дорогая часть конвейера (у Ghostscript это 43 мс из 57),
+ * и платить её за каждую страницу нет смысла. Файлы Netpbm самоописываемы,
+ * поэтому склеенный поток разбирается последовательно.
  */
-final class Rasterizer
+abstract class PnmRasterizer implements RasterizerInterface
 {
     public function __construct(
-        private readonly string $ghostscript,
-        private readonly Log $log,
-        private readonly int $timeoutSeconds = 30,
-        /** true — рендерить в серый и бинаризовать самим; false — просить у gs 1 бит. */
-        private readonly bool $grayscaleThreshold = true,
-        /** Сглаживание при рендеринге: 1 (выкл), 2 или 4. */
-        private readonly int $antialias = 4,
+        protected readonly string $binary,
+        protected readonly Log $log,
+        protected readonly int $timeoutSeconds = 30,
         /** Предохранитель от «бомб»: максимум точек в растре одной страницы. */
-        private readonly int $maxDots = 40_000_000,
+        protected readonly int $maxDots = 40_000_000,
     ) {
     }
 
+    /** @return list<string> */
+    abstract protected function buildCommand(string $pdfPath, float $dpi): array;
+
+    /** 'P5' — 8 бит серого с собственным порогом, 'P4' — готовый 1 бит. */
+    abstract protected function magic(): string;
+
+    public function isAvailable(): bool
+    {
+        return is_executable($this->binary);
+    }
+
     /**
-     * Рендерит все страницы PDF с заданным разрешением.
-     *
-     * @param float $dpi       разрешение; дробные значения допустимы и используются
-     *                         для вписывания страницы в размер этикетки
-     * @param int   $threshold порог бинаризации 1..254 (для режима с полутоном)
-     * @return list<Bitmap> по одному растру на страницу, в порядке страниц
+     * @return list<Bitmap>
      */
     public function rasterize(string $pdfPath, float $dpi, int $threshold = 128): array
     {
@@ -54,28 +48,29 @@ final class Rasterizer
             throw new \InvalidArgumentException("Разрешение должно быть положительным, задано {$dpi}");
         }
 
-        $command = $this->buildCommand($pdfPath, $dpi);
         $started = hrtime(true);
-        [$stdout, $stderr, $exitCode] = $this->run($command);
+        [$stdout, $stderr, $exitCode] = $this->run($this->buildCommand($pdfPath, $dpi));
         $elapsedMs = (int) ((hrtime(true) - $started) / 1_000_000);
 
         if ($exitCode !== 0) {
             throw new \RuntimeException(
-                "Ghostscript завершился с кодом {$exitCode}: " . $this->tail($stderr),
+                sprintf('%s завершился с кодом %d: %s', $this->name(), $exitCode, $this->tail($stderr)),
             );
         }
 
         if ($stdout === '') {
             throw new \RuntimeException(
-                'Ghostscript не выдал ни одной страницы. ' . $this->tail($stderr),
+                sprintf('%s не выдал ни одной страницы. %s', $this->name(), $this->tail($stderr)),
             );
         }
 
         $pages = $this->splitPages($stdout, $threshold);
 
         $this->log->debug('страницы отрендерены', [
+            'engine' => $this->name(),
             'pdf' => basename($pdfPath),
             'pages' => count($pages),
+            'dpi' => round($dpi, 2),
             'ms' => $elapsedMs,
             'raster_bytes' => strlen($stdout),
         ]);
@@ -88,9 +83,10 @@ final class Rasterizer
      *
      * @return list<Bitmap>
      */
-    private function splitPages(string $stream, int $threshold): array
+    protected function splitPages(string $stream, int $threshold): array
     {
-        $magic = $this->grayscaleThreshold ? 'P5' : 'P4';
+        $magic = $this->magic();
+        $gray = $magic === 'P5';
         $pages = [];
         $offset = 0;
         $len = strlen($stream);
@@ -106,17 +102,16 @@ final class Rasterizer
 
             if (substr($stream, $offset, 2) !== $magic) {
                 throw new \RuntimeException(sprintf(
-                    'Ожидался %s на позиции %d, получено "%s". Похоже, Ghostscript написал в stdout что-то ещё.',
+                    'Ожидался %s на позиции %d, получено "%s". Похоже, %s написал в stdout что-то ещё.',
                     $magic,
                     $offset,
                     substr($stream, $offset, 16),
+                    $this->name(),
                 ));
             }
 
             $chunk = substr($stream, $offset);
-            $bitmap = $this->grayscaleThreshold
-                ? Bitmap::fromPgm($chunk, $threshold)
-                : Bitmap::fromPbm($chunk);
+            $bitmap = $gray ? Bitmap::fromPgm($chunk, $threshold) : Bitmap::fromPbm($chunk);
 
             if ($bitmap->width * $bitmap->height > $this->maxDots) {
                 throw new \RuntimeException(sprintf(
@@ -129,21 +124,26 @@ final class Rasterizer
             }
 
             $pages[] = $bitmap;
-            $offset += $this->consumedBytes($chunk, $bitmap);
+            $offset += $this->consumedBytes($chunk, $bitmap, $gray);
         }
 
         if ($pages === []) {
-            throw new \RuntimeException('В выводе Ghostscript не нашлось ни одной страницы');
+            throw new \RuntimeException('В выводе ' . $this->name() . ' не нашлось ни одной страницы');
         }
 
         return $pages;
     }
 
-    /** Сколько байт занимает одна картинка в потоке: заголовок плюс данные. */
-    private function consumedBytes(string $chunk, Bitmap $bitmap): int
+    /**
+     * Сколько байт занимает одна картинка в потоке: заголовок плюс данные.
+     *
+     * Ghostscript вставляет в заголовок строку комментария
+     * («# Image generated by GPL Ghostscript»), длина которой зависит от устройства,
+     * поэтому смещение считается разбором, а не по фиксированной длине.
+     */
+    protected function consumedBytes(string $chunk, Bitmap $bitmap, bool $gray): int
     {
-        // Заголовок заканчивается ровно одним разделителем после последнего числа.
-        $fields = $this->grayscaleThreshold ? 3 : 2;
+        $fields = $gray ? 3 : 2;
         $pos = 2;
         $len = strlen($chunk);
 
@@ -168,39 +168,11 @@ final class Rasterizer
         }
         $pos++;   // единственный разделитель перед данными
 
-        $body = $this->grayscaleThreshold
+        $body = $gray
             ? $bitmap->width * $bitmap->height
             : $bitmap->bytesPerRow * $bitmap->height;
 
         return $pos + $body;
-    }
-
-    /** @return list<string> */
-    private function buildCommand(string $pdfPath, float $dpi): array
-    {
-        // Разрешение может быть дробным: так страница вписывается в этикетку
-        // без -dPDFFitPage и без риска, что Ghostscript развернёт её сам.
-        $resolution = rtrim(rtrim(number_format($dpi, 4, '.', ''), '0'), '.');
-
-        return [
-            $this->ghostscript,
-            '-q',                        // без баннера
-            '-dNOPAUSE',
-            '-dBATCH',
-            '-dSAFER',
-            // Сообщения PostScript уходят в stderr, иначе они попадут в поток растра и всё сломают.
-            '-sstdout=%stderr',
-            '-dNOPROMPT',
-            '-sDEVICE=' . ($this->grayscaleThreshold ? 'pgmraw' : 'pbmraw'),
-            '-r' . $resolution,
-            // На однобитных устройствах эти ключи не действуют вовсе, а на pgmraw дают
-            // субпиксельную точность краёв штрихов — после порога граница встаёт на место.
-            '-dTextAlphaBits=' . $this->antialias,
-            '-dGraphicsAlphaBits=' . $this->antialias,
-            '-sOutputFile=-',            // весь вывод в stdout одним потоком
-            '-f',
-            $pdfPath,
-        ];
     }
 
     /**
@@ -213,7 +185,7 @@ final class Rasterizer
      * @param  list<string> $command
      * @return array{0:string,1:string,2:int}
      */
-    private function run(array $command): array
+    protected function run(array $command): array
     {
         $descriptors = [
             0 => ['file', '/dev/null', 'r'],
@@ -223,7 +195,7 @@ final class Rasterizer
 
         $process = @proc_open($command, $descriptors, $pipes);
         if (!is_resource($process)) {
-            throw new \RuntimeException("Не удалось запустить Ghostscript: {$this->ghostscript}");
+            throw new \RuntimeException("Не удалось запустить {$this->name()}: {$this->binary}");
         }
 
         stream_set_blocking($pipes[1], false);
@@ -243,7 +215,7 @@ final class Rasterizer
             if ($remaining <= 0) {
                 $this->terminate($process, $pipes);
                 throw new \RuntimeException(
-                    "Ghostscript не уложился в {$this->timeoutSeconds} с и был остановлен",
+                    "{$this->name()} не уложился в {$this->timeoutSeconds} с и был остановлен",
                 );
             }
 
@@ -282,8 +254,8 @@ final class Rasterizer
     }
 
     /**
-     * @param resource                 $process
-     * @param array<int,resource>      $pipes
+     * @param resource            $process
+     * @param array<int,resource> $pipes
      */
     private function terminate($process, array $pipes): void
     {
@@ -296,7 +268,7 @@ final class Rasterizer
         proc_close($process);
     }
 
-    private function tail(string $text, int $limit = 600): string
+    protected function tail(string $text, int $limit = 600): string
     {
         $text = trim($text);
         if ($text === '') {
@@ -304,5 +276,11 @@ final class Rasterizer
         }
 
         return strlen($text) > $limit ? '…' . substr($text, -$limit) : $text;
+    }
+
+    /** Дробное разрешение в виде строки: без запятой из локали и без экспоненты. */
+    protected static function formatDpi(float $dpi): string
+    {
+        return rtrim(rtrim(number_format($dpi, 4, '.', ''), '0'), '.');
     }
 }

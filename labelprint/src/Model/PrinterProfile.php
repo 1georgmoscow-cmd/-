@@ -78,6 +78,11 @@ final class PrinterProfile
          * с шириной данных. Прибавка не больше 7 точек — это 0,9 мм при 203 dpi.
          */
         public readonly bool $alignWidthToByte = true,
+        /**
+         * Движок растеризации: ghostscript | mupdf | auto | null (взять из конфига).
+         * MuPDF примерно втрое быстрее, Ghostscript терпимее к повреждённым PDF.
+         */
+        public readonly ?string $engine = null,
     ) {
         if ($this->dpi <= 0) {
             throw new \InvalidArgumentException("Профиль {$code}: dpi должен быть положительным");
@@ -102,6 +107,11 @@ final class PrinterProfile
         }
         if ($this->quantity < 1) {
             throw new \InvalidArgumentException("Профиль {$code}: quantity должен быть не меньше 1");
+        }
+        if ($this->engine !== null && !in_array($this->engine, ['ghostscript', 'mupdf', 'auto'], true)) {
+            throw new \InvalidArgumentException(
+                "Профиль {$code}: engine должен быть ghostscript, mupdf, auto или null",
+            );
         }
         if ($this->printMode !== null && !isset(self::PRINT_MODES[$this->printMode])) {
             throw new \InvalidArgumentException(
@@ -135,6 +145,7 @@ final class PrinterProfile
             printMode: isset($data['print_mode']) ? (string) $data['print_mode'] : null,
             printheadDots: isset($data['printhead_dots']) ? (int) $data['printhead_dots'] : null,
             alignWidthToByte: (bool) ($data['align_width_to_byte'] ?? true),
+            engine: isset($data['engine']) ? (string) $data['engine'] : null,
         );
     }
 
@@ -180,6 +191,7 @@ final class PrinterProfile
             $this->printMode,
             $this->printheadDots,
             $this->alignWidthToByte,
+            $this->engine,
         ], JSON_THROW_ON_ERROR)), 0, 16);
     }
 }

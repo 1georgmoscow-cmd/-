@@ -23,6 +23,8 @@ return [
         'print_rate' => null,        // ^PR
         'media_tracking' => 'gap',   // gap | mark | continuous | null
         'print_mode' => null,        // tear | peel | cutter | rewind | applicator | null
+        'engine' => null,            // ghostscript | mupdf | auto | null (взять из config.php)
+        'printhead_dots' => 832,     // ширина головки 4 дюйма при 203 dpi
         'auto_rotate' => true,       // довернуть на 90, если страница лежит боком
         'quantity' => 1,
     ],

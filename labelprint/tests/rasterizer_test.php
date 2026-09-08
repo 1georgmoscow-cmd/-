@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-use LabelPrint\Pdf\Rasterizer;
+use LabelPrint\Pdf\GhostscriptRasterizer;
 use LabelPrint\Support\Log;
 
 /**
@@ -52,7 +52,7 @@ return [
         $data = base64_encode(pgmBytes(32, 8, 16));
         $gs = fakeGs('gs-one.php', 'fwrite(STDOUT, base64_decode("' . $data . '"));');
 
-        $pages = (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
+        $pages = (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
 
         assertSame(1, count($pages), 'одна страница');
         assertSame(32, $pages[0]->width);
@@ -65,7 +65,7 @@ return [
         $data = base64_encode(pgmBytes(16, 4, 8) . pgmBytes(16, 4, 0) . pgmBytes(16, 4, 16));
         $gs = fakeGs('gs-three.php', 'fwrite(STDOUT, base64_decode("' . $data . '"));');
 
-        $pages = (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
+        $pages = (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
 
         assertSame(3, count($pages), 'три страницы');
         assertTrue($pages[0]->pixel(0, 0) && !$pages[0]->pixel(15, 0), 'первая — половина чёрная');
@@ -87,7 +87,7 @@ return [
         }
         PHP);
 
-        $pages = (new Rasterizer($gs, Log::null(), 20))->rasterize(dummyPdf(), DPI, THRESHOLD);
+        $pages = (new GhostscriptRasterizer($gs, Log::null(), 20))->rasterize(dummyPdf(), DPI, THRESHOLD);
 
         assertSame(1, count($pages));
         assertSame(800, $pages[0]->width);
@@ -98,7 +98,7 @@ return [
         $gs = fakeGs('gs-fail.php', 'fwrite(STDERR, "Error: /undefinedfilename in (label.pdf)"); exit(1);');
 
         try {
-            (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('кодом 1', $e->getMessage());
@@ -110,7 +110,7 @@ return [
         $gs = fakeGs('gs-empty.php', 'fwrite(STDERR, "нечего рендерить");');
 
         try {
-            (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('не выдал ни одной страницы', $e->getMessage());
@@ -122,7 +122,7 @@ return [
         $gs = fakeGs('gs-junk.php', 'fwrite(STDOUT, "GPL Ghostscript 10.02.1 (2023-11-01)\n");');
 
         try {
-            (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('Ожидался P5', $e->getMessage());
@@ -134,7 +134,7 @@ return [
 
         $started = microtime(true);
         try {
-            (new Rasterizer($gs, Log::null(), 1))->rasterize(dummyPdf(), DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null(), 1))->rasterize(dummyPdf(), DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('не уложился', $e->getMessage());
@@ -147,7 +147,7 @@ return [
         $pbm = "P4\n16 2\n" . chr(0b10101010) . chr(0b00000000) . chr(0b11111111) . chr(0b11111111);
         $gs = fakeGs('gs-pbm.php', 'fwrite(STDOUT, base64_decode("' . base64_encode($pbm) . '"));');
 
-        $pages = (new Rasterizer($gs, Log::null(), 30, false))->rasterize(dummyPdf(), DPI, THRESHOLD);
+        $pages = (new GhostscriptRasterizer($gs, Log::null(), 30, false))->rasterize(dummyPdf(), DPI, THRESHOLD);
 
         assertSame(1, count($pages));
         assertTrue($pages[0]->pixel(0, 0), 'первый бит чёрный');
@@ -167,7 +167,7 @@ return [
 
         foreach ([[190.8123, '190.8123'], [203.0, '203'], [76.5, '76.5']] as [$dpi, $expected]) {
             try {
-                (new Rasterizer($probe, Log::null()))->rasterize(dummyPdf(), $dpi, THRESHOLD);
+                (new GhostscriptRasterizer($probe, Log::null()))->rasterize(dummyPdf(), $dpi, THRESHOLD);
                 throw new RuntimeException('ожидалось исключение');
             } catch (RuntimeException $e) {
                 assertContains("разрешение={$expected}", $e->getMessage(), "разрешение {$dpi}");
@@ -179,7 +179,7 @@ return [
         $gs = fakeGs('gs-unused.php', 'exit(0);');
 
         try {
-            (new Rasterizer($gs, Log::null()))->rasterize(dummyPdf(), 0.0, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null()))->rasterize(dummyPdf(), 0.0, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (InvalidArgumentException $e) {
             assertContains('положительным', $e->getMessage());
@@ -193,7 +193,7 @@ return [
         PHP);
 
         try {
-            (new Rasterizer($gs, Log::null(), 30, true, 4, 1_000_000))->rasterize(dummyPdf(), DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null(), 30, true, 4, 1_000_000))->rasterize(dummyPdf(), DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('слишком велик', $e->getMessage());
@@ -204,7 +204,7 @@ return [
         $gs = fakeGs('gs-never.php', 'fwrite(STDOUT, "не должно быть вызвано");');
 
         try {
-            (new Rasterizer($gs, Log::null()))->rasterize('/nope/missing.pdf', DPI, THRESHOLD);
+            (new GhostscriptRasterizer($gs, Log::null()))->rasterize('/nope/missing.pdf', DPI, THRESHOLD);
             throw new RuntimeException('ожидалось исключение');
         } catch (RuntimeException $e) {
             assertContains('недоступен для чтения', $e->getMessage());

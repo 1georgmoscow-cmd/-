@@ -18,6 +18,17 @@ final class Bitmap
     /** Таблица разворота бит в байте — для зеркального отражения по горизонтали. */
     private static ?array $reverseTable = null;
 
+    /** Все 256 значений байта по порядку — «откуда» для strtr при бинаризации. */
+    private static ?string $allBytes = null;
+
+    /** Полубайт в виде четырёх бит -> шестнадцатеричный символ. */
+    private const NIBBLE_TO_HEX = [
+        '0000' => '0', '0001' => '1', '0010' => '2', '0011' => '3',
+        '0100' => '4', '0101' => '5', '0110' => '6', '0111' => '7',
+        '1000' => '8', '1001' => '9', '1010' => 'a', '1011' => 'b',
+        '1100' => 'c', '1101' => 'd', '1110' => 'e', '1111' => 'f',
+    ];
+
     /**
      * @param string $data $bytesPerRow * $height байт упакованных пикселей
      */
@@ -98,23 +109,57 @@ final class Bitmap
 
         // Порог задан в шкале 0..255; пересчитываем под фактический maxval файла.
         $cut = (int) round($threshold * $maxVal / 255);
+        $body = substr($pgm, $offset, $need);
+
+        // Побайтовый цикл на этикетке 800x1199 занимает около 24 мс — больше, чем
+        // всё кодирование ZPL. Поэтому работаем строками целиком:
+        //   1) strtr с двумя строками переводит каждый байт яркости в символ '0' или '1';
+        //   2) chunk_split дополняет каждую строку растра нулями до целого числа байт;
+        //   3) strtr по полубайтам превращает биты в hex;
+        //   4) hex2bin упаковывает всё в байты.
+        // Итого около 4 мс вместо 24.
+        $bits = strtr($body, self::allBytes(), self::thresholdMap($cut));
 
         $bytesPerRow = intdiv($width + 7, 8);
-        $out = str_repeat("\x00", $bytesPerRow * $height);
-        $src = $offset;
-
-        for ($y = 0; $y < $height; $y++) {
-            $rowBase = $y * $bytesPerRow;
-            for ($x = 0; $x < $width; $x++) {
-                if (ord($pgm[$src + $x]) <= $cut) {          // тёмный пиксель -> печатаем точку
-                    $i = $rowBase + ($x >> 3);
-                    $out[$i] = chr(ord($out[$i]) | (0x80 >> ($x & 7)));
-                }
-            }
-            $src += $width;
+        $padBits = $bytesPerRow * 8 - $width;
+        if ($padBits > 0) {
+            $bits = chunk_split($bits, $width, str_repeat('0', $padBits));
         }
 
-        return new self($width, $height, $bytesPerRow, $out);
+        $hex = strtr($bits, self::NIBBLE_TO_HEX);
+        $data = hex2bin($hex);
+
+        if ($data === false || strlen($data) !== $bytesPerRow * $height) {
+            throw new \RuntimeException('Не удалось упаковать растр PGM в 1 бит на пиксель');
+        }
+
+        return new self($width, $height, $bytesPerRow, $data);
+    }
+
+    /** Строка из всех 256 байт по возрастанию — «откуда» для трёхаргументного strtr. */
+    private static function allBytes(): string
+    {
+        if (self::$allBytes !== null) {
+            return self::$allBytes;
+        }
+
+        $s = '';
+        for ($i = 0; $i < 256; $i++) {
+            $s .= chr($i);
+        }
+
+        return self::$allBytes = $s;
+    }
+
+    /**
+     * Строка из 256 символов: позиция — значение яркости, символ — '1' (чёрная точка,
+     * яркость не выше порога) или '0'.
+     */
+    private static function thresholdMap(int $cut): string
+    {
+        static $cache = [];
+
+        return $cache[$cut] ??= str_repeat('1', $cut + 1) . str_repeat('0', 255 - $cut);
     }
 
     /** Сериализация обратно в PBM — для отладки и тестов. */

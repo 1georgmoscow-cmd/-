@@ -7,7 +7,7 @@ use LabelPrint\Model\Job;
 use LabelPrint\Model\PrinterProfile;
 use LabelPrint\Pdf\Bitmap;
 use LabelPrint\Pdf\PdfInfo;
-use LabelPrint\Pdf\Rasterizer;
+use LabelPrint\Pdf\RasterizerFactory;
 use LabelPrint\Render\ZplLabelBuilder;
 use LabelPrint\Storage\LabelRepository;
 use LabelPrint\Storage\PdfFileRepository;
@@ -24,7 +24,7 @@ final class RenderService
 {
     public function __construct(
         private readonly string $pdfDir,
-        private readonly Rasterizer $rasterizer,
+        private readonly RasterizerFactory $rasterizers,
         private readonly ZplLabelBuilder $builder,
         private readonly LabelRepository $labels,
         private readonly PdfFileRepository $files,
@@ -108,7 +108,7 @@ final class RenderService
         $dpi = $this->resolveDpi($info, $profile, $rotation);
 
         $pages = [];
-        foreach ($this->rasterizer->rasterize($absolutePdfPath, $dpi, $profile->threshold) as $raster) {
+        foreach ($this->rasterizers->for($profile)->rasterize($absolutePdfPath, $dpi, $profile->threshold) as $raster) {
             $pages[] = $this->prepare($raster, $profile, $rotation);
         }
 

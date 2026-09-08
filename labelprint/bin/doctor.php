@@ -49,6 +49,25 @@ function check(string $title, callable $probe): void
     };
 }
 
+/** Запускает утилиту и возвращает первую строку её вывода. */
+function probeVersion(string $binary, array $args, int $limit = 200): string
+{
+    $process = @proc_open([$binary, ...$args], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    if (!is_resource($process)) {
+        return '(не запускается)';
+    }
+
+    $out = (string) stream_get_contents($pipes[1]);
+    $err = (string) stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
+
+    $text = trim($out !== '' ? $out : $err);
+
+    return $limit > 500 ? $text : trim(strtok($text, "\n") ?: '');
+}
+
 echo "Проверка окружения labelprint\n\n";
 
 check('PHP версия', static fn(): array => PHP_VERSION_ID >= 80100
@@ -101,22 +120,37 @@ check('Ghostscript', static function () use ($app): array {
         return ['fail', "{$binary} не найден: apt install ghostscript"];
     }
 
-    $process = proc_open([$binary, '--version'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-    $version = trim((string) stream_get_contents($pipes[1]));
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    proc_close($process);
+    return ['ok', $binary . ' версия ' . probeVersion($binary, ['--version'])];
+});
 
-    return ['ok', "{$binary} версия {$version}"];
+check('mutool (mupdf-tools)', static function () use ($app): array {
+    $binary = $app->config->string('mutool', '/usr/bin/mutool');
+    if (!is_executable($binary)) {
+        return ['warn', 'нет — движок mupdf недоступен (apt install mupdf-tools). '
+            . 'Он примерно втрое быстрее Ghostscript'];
+    }
+
+    return ['ok', $binary . ' ' . probeVersion($binary, ['-v'])];
+});
+
+check('движок растеризации', static function () use ($app): array {
+    $engine = $app->config->string('render.engine', 'ghostscript');
+    $rasterizer = $app->rasterizers()->make($engine);
+
+    if (!$rasterizer->isAvailable()) {
+        return ['fail', "выбран {$engine}, но {$rasterizer->name()} не установлен"];
+    }
+
+    return ['ok', "{$engine} -> {$rasterizer->name()}"];
 });
 
 check('устройство pgmraw в Ghostscript', static function () use ($app): array {
     $binary = $app->config->string('ghostscript', '/usr/bin/gs');
-    $process = proc_open([$binary, '-h'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-    $out = (string) stream_get_contents($pipes[1]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    proc_close($process);
+    if (!is_executable($binary)) {
+        return ['warn', 'Ghostscript не установлен, проверка пропущена'];
+    }
+
+    $out = probeVersion($binary, ['-h'], 8192);
 
     return str_contains($out, 'pgmraw')
         ? ['ok', 'доступно']

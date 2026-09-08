@@ -112,6 +112,41 @@ return [
         assertTrue(!$b->pixel(3, 0), 'значение 255 -> белый');
     },
 
+    'быстрая бинаризация совпадает с попиксельной' => static function (): void {
+        // fromPgm работает строками целиком (strtr + chunk_split + hex2bin) ради скорости:
+        // на этикетке 800x1199 это 10 мс вместо 50. Сверяем с очевидной реализацией
+        // на ширинах кратных и не кратных 8 и на всём диапазоне порогов.
+        foreach ([[800, 12], [799, 9], [13, 5], [1, 1], [257, 3]] as [$w, $h]) {
+            $body = '';
+            $state = $w * 31 + $h;
+            for ($i = 0; $i < $w * $h; $i++) {
+                $state = ($state * 1103515245 + 12345) & 0x7FFFFFFF;
+                $body .= chr(($state >> 13) & 0xFF);
+            }
+            $pgm = "P5\n{$w} {$h}\n255\n" . $body;
+
+            foreach ([1, 64, 128, 200, 254] as $threshold) {
+                $cut = (int) round($threshold * 255 / 255);
+                $bytesPerRow = intdiv($w + 7, 8);
+                $expected = str_repeat("\x00", $bytesPerRow * $h);
+                for ($y = 0; $y < $h; $y++) {
+                    for ($x = 0; $x < $w; $x++) {
+                        if (ord($body[$y * $w + $x]) <= $cut) {
+                            $i = $y * $bytesPerRow + ($x >> 3);
+                            $expected[$i] = chr(ord($expected[$i]) | (0x80 >> ($x & 7)));
+                        }
+                    }
+                }
+
+                assertSame(
+                    $expected,
+                    Bitmap::fromPgm($pgm, $threshold)->data,
+                    "растр {$w}x{$h}, порог {$threshold}",
+                );
+            }
+        }
+    },
+
     'порог PGM управляет результатом' => static function (): void {
         $pgm = "P5\n1 1\n255\n" . chr(200);
         assertTrue(!Bitmap::fromPgm($pgm, 128)->pixel(0, 0), 'при пороге 128 — белый');
