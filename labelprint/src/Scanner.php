@@ -67,10 +67,12 @@ final class Scanner
         $enqueued = 0;
         $skipped = 0;
         $now = time();
+        $seen = [];
 
         foreach ($this->walk($base) as $absolute) {
             $scanned++;
             $relative = substr($absolute, strlen($base) + 1);
+            $seen[$relative] = true;
 
             $stat = @stat($absolute);
             if ($stat === false) {
@@ -86,8 +88,8 @@ final class Scanner
             }
 
             // Уже известен и не менялся — трогать нечего.
-            $seen = $known[$relative] ?? null;
-            if ($seen !== null && $seen['size'] === $size && $seen['mtime'] === $mtime) {
+            $previous = $known[$relative] ?? null;
+            if ($previous !== null && $previous['size'] === $size && $previous['mtime'] === $mtime) {
                 continue;
             }
 
@@ -124,6 +126,10 @@ final class Scanner
                 'new' => $file['changed'],
             ]);
         }
+
+        // Забываем файлы, которых больше нет: иначе в долгоживущем процессе
+        // накапливаются записи об удалённых и о вечно недописанных файлах.
+        $this->pending = array_intersect_key($this->pending, $seen);
 
         return ['scanned' => $scanned, 'enqueued' => $enqueued, 'skipped' => $skipped];
     }

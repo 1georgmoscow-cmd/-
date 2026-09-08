@@ -69,8 +69,15 @@ CREATE TABLE IF NOT EXISTS `render_jobs` (
     PRIMARY KEY (`id`),
     -- Один PDF под один профиль рендерим один раз.
     UNIQUE KEY `uk_job_file_profile` (`pdf_file_id`, `profile_code`),
-    -- Рабочий индекс захвата: сначала фильтр по состоянию, затем по времени доступности.
-    KEY `idx_job_claim` (`state`, `available_at`, `priority`, `id`),
+    -- Индекс повторяет ORDER BY запроса захвата: state — константа, дальше
+    -- priority DESC, затем id ASC. Тогда строки читаются уже в нужном порядке
+    -- и запрос останавливается на первой подходящей, без сортировки всего набора.
+    -- available_at сюда намеренно НЕ входит: как диапазонное условие он оборвал бы
+    -- использование индекса для сортировки, и каждый захват делал бы filesort.
+    -- Он остаётся обычным фильтром — отложенных заданий в очереди обычно единицы.
+    -- (В MySQL 5.7 ключевое слово DESC разбирается, но игнорируется: там сортировка
+    -- останется, что при небольшой очереди несущественно.)
+    KEY `idx_job_claim` (`state`, `priority` DESC, `id`),
     KEY `idx_job_lease` (`state`, `lease_expires_at`),
     -- Уникальный: два задания не могут нести один токен захвата, и это гарантирует,
     -- что перечитывание своего задания в запасном варианте не найдёт чужое.
@@ -106,7 +113,9 @@ CREATE TABLE IF NOT EXISTS `zpl_labels` (
     -- Доля чёрного: близко к 0 — пустая этикетка, близко к 1 — вероятная инверсия.
     `ink_coverage`        FLOAT           DEFAULT NULL,
     `render_ms`           INT UNSIGNED    DEFAULT NULL,
+    -- created_at не трогается при перерендере: по нему видно, когда этикетка появилась.
     `created_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     -- Ключ кэша: содержимое PDF + параметры профиля + номер страницы.
     UNIQUE KEY `uk_label_cache` (`pdf_sha256`, `profile_fingerprint`, `page_no`),

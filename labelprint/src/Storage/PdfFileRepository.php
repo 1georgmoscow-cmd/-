@@ -48,6 +48,7 @@ final class PdfFileRepository
                 sha256 = VALUES(sha256), size_bytes = VALUES(size_bytes), mtime = VALUES(mtime),
                 id = LAST_INSERT_ID(pdf_files.id)',
             [$relativePath, $pathSha1, $sha256, $sizeBytes, $mtime],
+            idempotent: true,
         );
 
         return ['id' => $this->db->lastInsertId(), 'changed' => true];
@@ -55,7 +56,7 @@ final class PdfFileRepository
 
     public function setPageCount(int $id, int $pageCount): void
     {
-        $this->db->run('UPDATE pdf_files SET page_count = ? WHERE id = ?', [$pageCount, $id]);
+        $this->db->run('UPDATE pdf_files SET page_count = ? WHERE id = ?', [$pageCount, $id], idempotent: true);
     }
 
     /** @return array<string,mixed>|null */

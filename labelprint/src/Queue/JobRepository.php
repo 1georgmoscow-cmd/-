@@ -85,6 +85,7 @@ final class JobRepository
                 id = LAST_INSERT_ID(render_jobs.id)
             SQL,
             [$pdfFileId, $profileCode, $profileFingerprint, self::STATE_PENDING, $priority, $maxAttempts],
+            idempotent: true,
         );
 
         return $this->db->lastInsertId();
@@ -184,6 +185,7 @@ final class JobRepository
                 max(1, $leaseSeconds),
             ),
             [$job->id, $job->claimToken, self::STATE_RUNNING],
+            idempotent: true,
         );
 
         return $stmt->rowCount() > 0;
@@ -197,6 +199,7 @@ final class JobRepository
                     error_message = NULL, duration_ms = ?
               WHERE id = ? AND claim_token = ?',
             [self::STATE_DONE, $durationMs, $job->id, $job->claimToken],
+            idempotent: true,
         );
     }
 
@@ -222,6 +225,7 @@ final class JobRepository
                     $delay,
                 ),
                 [self::STATE_PENDING, $error, $job->id, $job->claimToken],
+                idempotent: true,
             );
         } else {
             $this->db->run(
@@ -230,6 +234,7 @@ final class JobRepository
                         error_message = ?
                   WHERE id = ? AND claim_token = ?',
                 [self::STATE_FAILED, $error, $job->id, $job->claimToken],
+                idempotent: true,
             );
         }
 
@@ -281,6 +286,7 @@ final class JobRepository
                 . 'Задание снято с очереди. Последнее известное сообщение: ',
                 self::STATE_RUNNING,
             ],
+            idempotent: true,
         )->rowCount();
 
         $released = $this->db->run(
@@ -290,6 +296,7 @@ final class JobRepository
                     available_at = DATE_ADD(NOW(), INTERVAL 5 SECOND)
               WHERE {$expired}",
             [self::STATE_PENDING, 'аренда истекла, задание возвращено в очередь', self::STATE_RUNNING],
+            idempotent: true,
         )->rowCount();
 
         return ['released' => $released, 'dead' => $dead];
@@ -303,6 +310,7 @@ final class JobRepository
                 SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL
               WHERE state = ? AND owner = ?',
             [self::STATE_PENDING, self::STATE_RUNNING, $owner],
+            idempotent: true,
         );
 
         return $stmt->rowCount();
@@ -326,7 +334,7 @@ final class JobRepository
             $params[] = $profileCode;
         }
 
-        return $this->db->run($sql, $params)->rowCount();
+        return $this->db->run($sql, $params, idempotent: true)->rowCount();
     }
 
     /** @return array<string,int> состояние => количество */

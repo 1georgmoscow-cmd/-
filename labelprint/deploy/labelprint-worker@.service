@@ -19,7 +19,7 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/labelprint
-ExecStart=/usr/bin/php /opt/labelprint/bin/worker.php
+ExecStart=/usr/bin/php -d memory_limit=512M /opt/labelprint/bin/worker.php
 
 # Воркер сам завершается после worker.max_jobs заданий или max_lifetime_sec секунд —
 # это штатный выход с кодом 0, и systemd обязан поднять процесс снова.
@@ -34,9 +34,21 @@ TimeoutStopSec=60
 # EnvironmentFile=-/etc/labelprint/env
 # Формат файла: LABELPRINT_DB_PASSWORD=...
 
+# glibc по умолчанию заводит арену на поток; растеризатору это ни к чему,
+# а резидентная память процесса растёт заметно.
+Environment=MALLOC_ARENA_MAX=2
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=labelprint-worker-%i
+# journald по умолчанию отбрасывает больше 10000 сообщений за 30 секунд.
+# На тысячах этикеток в минуту это молча съедает часть лога.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=50000
+
+# Растеризация одной этикетки укладывается в сотни мегабайт; ограничение
+# страхует от PDF-«бомбы», не мешая нормальной работе.
+MemoryMax=768M
 
 # Минимальные привилегии: воркеру нужно только читать PDF и ходить в MySQL.
 NoNewPrivileges=true

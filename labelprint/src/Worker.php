@@ -76,7 +76,9 @@ final class Worker
                         'count' => $recovered['dead'],
                     ]);
                 }
-                $nextMaintenance = $now + 30;
+                // Разброс, чтобы N воркеров не запускали одинаковый скан по индексу
+                // аренды в одну и ту же секунду.
+                $nextMaintenance = $now + 30 + random_int(0, 15);
             }
 
             if ($this->scanner !== null && $now >= $nextScan) {
@@ -128,7 +130,18 @@ final class Worker
 
         try {
             $profile = $this->profiles->get($job->profileCode);
-            $result = $this->renderer->renderJob($job, $profile);
+
+            $result = $this->renderer->renderJob($job, $profile, function (int $pageNo) use ($job): void {
+                // Продлеваем аренду после каждой страницы. Если продлить не удалось,
+                // задание уже отобрал другой воркер — продолжать нельзя, иначе
+                // обе копии запишут результат.
+                if (!$this->jobs->renewLease($job, $this->leaseSeconds)) {
+                    throw new \RuntimeException(
+                        "Аренда задания #{$job->id} потеряна на странице {$pageNo}: "
+                        . 'его перехватил другой воркер, работа прекращена',
+                    );
+                }
+            });
 
             $this->jobs->complete($job, (int) ((hrtime(true) - $started) / 1_000_000));
             $this->jobsDone++;

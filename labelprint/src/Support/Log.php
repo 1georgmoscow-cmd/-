@@ -106,16 +106,27 @@ final class Log
 
         $name = self::LEVEL_NAMES[$level] ?? 'info';
 
+        // JSON_INVALID_UTF8_SUBSTITUTE обязателен: в контекст попадают имена файлов,
+        // а они в Linux — произвольные байты. PDF с именем в CP1251 иначе заставил бы
+        // json_encode вернуть false, и строка лога ушла бы пустой ровно тогда,
+        // когда она нужнее всего.
+        $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE;
+
         if ($this->json) {
             $line = json_encode(
                 ['ts' => date('c'), 'level' => $name, 'channel' => $this->channel, 'msg' => $message] + $context,
-                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
+                $flags,
             );
         } else {
             $line = sprintf('[%s] %-7s %s: %s', date('Y-m-d H:i:s'), $name, $this->channel, $message);
             if ($context !== []) {
-                $line .= ' ' . json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                $line .= ' ' . json_encode($context, $flags);
             }
+        }
+
+        if ($line === false) {
+            $line = sprintf('[%s] %-7s %s: %s (контекст не сериализуется)',
+                date('Y-m-d H:i:s'), $name, $this->channel, $message);
         }
 
         fwrite($this->stream, $line . "\n");

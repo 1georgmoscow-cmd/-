@@ -34,9 +34,11 @@ final class RenderService
     }
 
     /**
+     * @param  callable(int):void|null $heartbeat вызывается после каждой записанной страницы;
+     *                                            воркер продлевает в нём аренду задания
      * @return array{pages:int,bytes:int,cached:bool,ms:int}
      */
-    public function renderJob(Job $job, PrinterProfile $profile): array
+    public function renderJob(Job $job, PrinterProfile $profile, ?callable $heartbeat = null): array
     {
         $absolute = $this->resolve($job->path);
         $started = hrtime(true);
@@ -58,7 +60,7 @@ final class RenderService
             ];
         }
 
-        return $this->render($absolute, $job->path, $job->pdfFileId, $job->sha256, $profile, $started);
+        return $this->render($absolute, $job->path, $job->pdfFileId, $job->sha256, $profile, $started, $heartbeat);
     }
 
     /**
@@ -131,6 +133,7 @@ final class RenderService
         string $sha256,
         PrinterProfile $profile,
         int $started,
+        ?callable $heartbeat = null,
     ): array {
         $pages = $this->renderPages($absolute, $profile);
 
@@ -157,6 +160,12 @@ final class RenderService
             );
 
             $totalBytes += strlen($zpl);
+
+            // Многостраничный PDF может рендериться дольше аренды. Без продления
+            // задание заберёт другой воркер, и одна и та же пачка уедет в базу дважды.
+            if ($heartbeat !== null) {
+                $heartbeat($pageNo);
+            }
         }
 
         // Если PDF стал короче, чем при прошлом рендере, лишние страницы надо убрать,

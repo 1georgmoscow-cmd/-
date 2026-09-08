@@ -35,6 +35,9 @@ final class LabelRepository
         ?float $inkCoverage = null,
         ?int $renderMs = null,
     ): int {
+        // Лучше понятная ошибка здесь, чем «MySQL server has gone away» на записи.
+        $this->db->assertFits(strlen($zpl), "ZPL страницы {$pageNo} файла {$pdfSha256}");
+
         $this->db->run(
             'INSERT INTO zpl_labels
                 (pdf_file_id, pdf_sha256, profile_code, profile_fingerprint, page_no,
@@ -53,7 +56,6 @@ final class LabelRepository
                 zpl_sha256 = VALUES(zpl_sha256),
                 ink_coverage = VALUES(ink_coverage),
                 render_ms = VALUES(render_ms),
-                created_at = CURRENT_TIMESTAMP,
                 id = LAST_INSERT_ID(zpl_labels.id)',
             [
                 $pdfFileId,
@@ -71,6 +73,7 @@ final class LabelRepository
                 $inkCoverage,
                 $renderMs,
             ],
+            idempotent: true,
         );
 
         return $this->db->lastInsertId();

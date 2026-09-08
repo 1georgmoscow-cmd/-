@@ -21,6 +21,7 @@ final class Db
     private const GONE_AWAY_CODES = [2006, 2013, 4031];
 
     private ?PDO $pdo = null;
+    private ?int $maxPacket = null;
 
     public function __construct(
         private readonly string $dsn,
@@ -52,11 +53,18 @@ final class Db
     }
 
     /**
-     * Выполняет запрос, при обрыве соединения переподключается и повторяет один раз.
+     * Выполняет запрос. При обрыве соединения оно всегда сбрасывается, но повторно
+     * запрос выполняется ТОЛЬКО если помечен идемпотентным.
+     *
+     * Разница принципиальная. Обрыв может случиться после того, как сервер уже применил
+     * запрос, но до того, как ответ дошёл до клиента. Слепой повтор «UPDATE ... SET
+     * attempts = attempts + 1» посчитал бы попытку дважды. Поэтому повтор разрешён
+     * для выборок и для запросов, задающих абсолютные значения.
      *
      * @param array<string|int,mixed> $params
+     * @param bool                    $idempotent можно ли безопасно выполнить повторно
      */
-    public function run(string $sql, array $params = []): PDOStatement
+    public function run(string $sql, array $params = [], bool $idempotent = false): PDOStatement
     {
         try {
             $stmt = $this->pdo()->prepare($sql);
@@ -68,7 +76,14 @@ final class Db
                 throw $e;
             }
 
+            // Соединение мертво в любом случае: сбрасываем, иначе все последующие
+            // запросы будут падать на том же испорченном дескрипторе.
             $this->pdo = null;
+
+            if (!$idempotent) {
+                throw $e;
+            }
+
             $stmt = $this->pdo()->prepare($sql);
             $stmt->execute($params);
 
@@ -82,7 +97,7 @@ final class Db
      */
     public function fetchOne(string $sql, array $params = []): ?array
     {
-        $row = $this->run($sql, $params)->fetch(PDO::FETCH_ASSOC);
+        $row = $this->run($sql, $params, true)->fetch(PDO::FETCH_ASSOC);
 
         return $row === false ? null : $row;
     }
@@ -94,7 +109,7 @@ final class Db
     public function fetchAll(string $sql, array $params = []): array
     {
         /** @var list<array<string,mixed>> */
-        return $this->run($sql, $params)->fetchAll(PDO::FETCH_ASSOC);
+        return $this->run($sql, $params, true)->fetchAll(PDO::FETCH_ASSOC);
     }
 
     public function lastInsertId(): int
@@ -136,7 +151,7 @@ final class Db
     public function ping(): bool
     {
         try {
-            $this->run('SELECT 1');
+            $this->run('SELECT 1', [], true);
 
             return true;
         } catch (PDOException) {
@@ -147,6 +162,41 @@ final class Db
     public function disconnect(): void
     {
         $this->pdo = null;
+        $this->maxPacket = null;
+    }
+
+    /**
+     * Предельный размер значения, которое можно записать одним запросом.
+     *
+     * Нужен именно как предпроверка. Если отправить пакет больше max_allowed_packet,
+     * сервер просто закрывает соединение, и клиент видит ошибку 2006 «MySQL server has
+     * gone away» — ту же, что при простое дольше wait_timeout. Без этой проверки
+     * администратор ищет проблему в таймаутах, тогда как дело в размере этикетки.
+     */
+    public function blobLimit(): int
+    {
+        if ($this->maxPacket === null) {
+            $row = $this->fetchOne('SELECT @@GLOBAL.max_allowed_packet AS n');
+            // 64 КБ запаса на текст запроса и остальные поля.
+            $this->maxPacket = max(65536, (int) ($row['n'] ?? 4194304) - 65536);
+        }
+
+        return $this->maxPacket;
+    }
+
+    /** @throws \RuntimeException если значение не пройдёт в одном пакете */
+    public function assertFits(int $bytes, string $what): void
+    {
+        $limit = $this->blobLimit();
+        if ($bytes > $limit) {
+            throw new \RuntimeException(sprintf(
+                '%s занимает %s байт и не пройдёт в один пакет MySQL (предел %s байт). '
+                . 'Поднимите max_allowed_packet или уменьшите разрешение/размер этикетки.',
+                $what,
+                number_format($bytes, 0, '.', ' '),
+                number_format($limit, 0, '.', ' '),
+            ));
+        }
     }
 
     /** Версия сервера — нужна, чтобы выбрать между SKIP LOCKED (8.0+) и запасным вариантом. */
