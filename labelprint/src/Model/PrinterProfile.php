@@ -170,8 +170,14 @@ final class PrinterProfile
     }
 
     /**
-     * Отпечаток профиля для ключа кэша: меняется только при изменении параметров,
-     * реально влияющих на итоговый ZPL (title и quantity — не влияют на растр).
+     * Отпечаток профиля для ключа кэша.
+     *
+     * Учитывается ВСЁ, что попадает в байты готового ZPL. Тираж тоже: он выводится
+     * командой ^PQ, и без него два профиля с разным числом копий делили бы одну
+     * запись кэша — кто отрендерил последним, тот и определял, сколько копий
+     * напечатается по обоим профилям.
+     *
+     * Не учитываются только code и title: они в вывод не попадают.
      */
     public function fingerprint(): string
     {
@@ -189,6 +195,7 @@ final class PrinterProfile
             $this->printRate,
             $this->mediaTracking,
             $this->printMode,
+            $this->quantity,
             $this->printheadDots,
             $this->alignWidthToByte,
             $this->engine,

@@ -31,7 +31,7 @@ final class JobRepository
     private const SELECT_JOB = <<<'SQL'
         SELECT j.id, j.pdf_file_id, j.profile_code, j.profile_fingerprint,
                j.attempts, j.max_attempts, j.claim_token,
-               f.path, f.sha256, f.size_bytes
+               f.path, f.sha256, f.size_bytes, f.page_count
           FROM render_jobs j
           JOIN pdf_files f ON f.id = j.pdf_file_id
         SQL;
@@ -54,36 +54,46 @@ final class JobRepository
         string $profileFingerprint,
         int $priority = 0,
         int $maxAttempts = 3,
+        /**
+         * Содержимое файла изменилось с прошлого раза. Без этого флага PDF,
+         * перезаписанный по тому же пути (обычное дело: оператор заметил ошибку
+         * в адресе и положил исправленный файл), никогда не рендерится заново:
+         * отпечаток профиля тот же, состояние done — и задание остаётся done
+         * навсегда, а потребитель печатает устаревшую этикетку.
+         */
+        bool $contentChanged = false,
     ): int {
+        // Условие повтора: либо изменились параметры профиля, либо изменилось
+        // содержимое файла, либо прошлая попытка упала. Значение подставляется
+        // прямо в текст запроса (это строго 0 или 1), а не через переменную сессии:
+        // переменная не пережила бы переподключение между двумя запросами и повтор
+        // молча не сработал бы.
+        $requeue = sprintf(
+            '(render_jobs.profile_fingerprint <> VALUES(profile_fingerprint)'
+            . ' OR render_jobs.state = \'failed\' OR %d = 1)',
+            $contentChanged ? 1 : 0,
+        );
+
         $this->db->run(
-            <<<'SQL'
+            str_replace('@requeue', $requeue, <<<'SQL'
             INSERT INTO render_jobs
                 (pdf_file_id, profile_code, profile_fingerprint, state, priority, max_attempts, available_at)
             VALUES (?, ?, ?, ?, ?, ?, NOW())
             ON DUPLICATE KEY UPDATE
-                state = IF(
-                    render_jobs.profile_fingerprint <> VALUES(profile_fingerprint)
-                        OR render_jobs.state = 'failed',
-                    'pending',
-                    render_jobs.state
-                ),
-                attempts = IF(
-                    render_jobs.profile_fingerprint <> VALUES(profile_fingerprint)
-                        OR render_jobs.state = 'failed',
-                    0,
-                    render_jobs.attempts
-                ),
-                available_at = IF(
-                    render_jobs.profile_fingerprint <> VALUES(profile_fingerprint)
-                        OR render_jobs.state = 'failed',
-                    NOW(),
-                    render_jobs.available_at
-                ),
+                state = IF(@requeue, 'pending', render_jobs.state),
+                attempts = IF(@requeue, 0, render_jobs.attempts),
+                available_at = IF(@requeue, NOW(), render_jobs.available_at),
+                -- Аренду тоже надо снять. Иначе воркер, который прямо сейчас
+                -- рендерит эту строку под старым отпечатком, успешно завершит
+                -- задание своим claim_token и вернёт его в done, стерев повтор.
+                owner = IF(@requeue, NULL, render_jobs.owner),
+                claim_token = IF(@requeue, NULL, render_jobs.claim_token),
+                lease_expires_at = IF(@requeue, NULL, render_jobs.lease_expires_at),
                 profile_fingerprint = VALUES(profile_fingerprint),
                 priority = GREATEST(render_jobs.priority, VALUES(priority)),
                 max_attempts = VALUES(max_attempts),
                 id = LAST_INSERT_ID(render_jobs.id)
-            SQL,
+            SQL),
             [$pdfFileId, $profileCode, $profileFingerprint, self::STATE_PENDING, $priority, $maxAttempts],
             idempotent: true,
         );
@@ -174,7 +184,20 @@ final class JobRepository
         return $row === null ? null : Job::fromRow($row);
     }
 
-    /** Продлевает аренду долгого задания, чтобы его не перехватил другой воркер. */
+    /**
+     * Продлевает аренду долгого задания. Возвращает false, только если задание
+     * действительно перестало принадлежать этому воркеру.
+     *
+     * Отдельная проверка нужна из-за семантики rowCount(). PDO отдаёт число
+     * ИЗМЕНЁННЫХ строк, а не совпавших с условием. Колонка lease_expires_at имеет
+     * тип DATETIME, то есть точность в одну секунду, и NOW() — это время начала
+     * запроса. Поэтому продление в ту же секунду, в которую аренда была записана
+     * при захвате, вычисляет ровно то же значение, InnoDB считает строку
+     * неизменённой и возвращает ноль. Обычная одностраничная этикетка рендерится
+     * за 60 мс, то есть в ту же секунду, — и воркер сам себе объявлял бы, что
+     * задание украли, бросал исключение и терял работу. Многостраничный файл при
+     * этом обрывался на первой странице, а задание помечалось выполненным.
+     */
     public function renewLease(Job $job, int $leaseSeconds): bool
     {
         $stmt = $this->db->run(
@@ -188,7 +211,18 @@ final class JobRepository
             idempotent: true,
         );
 
-        return $stmt->rowCount() > 0;
+        if ($stmt->rowCount() > 0) {
+            return true;
+        }
+
+        // Ноль изменённых строк означает либо «значение и так было таким»,
+        // либо «строка больше не наша». Различаем это явным чтением.
+        $row = $this->db->fetchOne(
+            'SELECT 1 AS ok FROM render_jobs WHERE id = ? AND claim_token = ? AND state = ?',
+            [$job->id, $job->claimToken, self::STATE_RUNNING],
+        );
+
+        return $row !== null;
     }
 
     public function complete(Job $job, int $durationMs): void
@@ -197,8 +231,8 @@ final class JobRepository
             'UPDATE render_jobs
                 SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL,
                     error_message = NULL, duration_ms = ?
-              WHERE id = ? AND claim_token = ?',
-            [self::STATE_DONE, $durationMs, $job->id, $job->claimToken],
+              WHERE id = ? AND claim_token = ? AND state = ?',
+            [self::STATE_DONE, $durationMs, $job->id, $job->claimToken, self::STATE_RUNNING],
             idempotent: true,
         );
     }
@@ -232,8 +266,8 @@ final class JobRepository
                 'UPDATE render_jobs
                     SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL,
                         error_message = ?
-                  WHERE id = ? AND claim_token = ?',
-                [self::STATE_FAILED, $error, $job->id, $job->claimToken],
+                  WHERE id = ? AND claim_token = ? AND state = ?',
+                [self::STATE_FAILED, $error, $job->id, $job->claimToken, self::STATE_RUNNING],
                 idempotent: true,
             );
         }

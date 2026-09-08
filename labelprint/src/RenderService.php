@@ -44,8 +44,15 @@ final class RenderService
         $started = hrtime(true);
 
         // Кэш контент-адресуемый: тот же PDF под тем же профилем уже посчитан.
+        //
+        // Засчитывается ТОЛЬКО полный комплект страниц. Проверять «страниц больше нуля»
+        // нельзя: если воркер умер на четвёртой странице десятистраничного файла,
+        // в базе останутся три этикетки, следующая попытка сочла бы их готовым
+        // результатом и пометила задание выполненным. Потребитель напечатал бы
+        // три этикетки из десяти, и никто бы об этом не узнал.
+        // page_count проставляется только после успешной записи ВСЕХ страниц.
         $cachedPages = $this->labels->pageCount($job->sha256, $profile);
-        if ($cachedPages > 0) {
+        if ($cachedPages > 0 && $job->pdfPageCount !== null && $cachedPages === $job->pdfPageCount) {
             $this->log->debug('этикетки уже в кэше, рендеринг пропущен', [
                 'path' => $job->path,
                 'profile' => $profile->code,
@@ -58,6 +65,15 @@ final class RenderService
                 'cached' => true,
                 'ms' => (int) ((hrtime(true) - $started) / 1_000_000),
             ];
+        }
+
+        if ($cachedPages > 0) {
+            $this->log->warning('в кэше неполный комплект страниц, файл рендерится заново', [
+                'path' => $job->path,
+                'profile' => $profile->code,
+                'в_кэше' => $cachedPages,
+                'ожидалось' => $job->pdfPageCount,
+            ]);
         }
 
         return $this->render($absolute, $job->path, $job->pdfFileId, $job->sha256, $profile, $started, $heartbeat);
@@ -81,9 +97,12 @@ final class RenderService
 
         $started = hrtime(true);
 
-        if (!$force && $this->labels->pageCount($sha256, $profile) > 0) {
+        $cachedPages = $this->labels->pageCount($sha256, $profile);
+        $knownPages = $this->files->findById($file['id'])['page_count'] ?? null;
+
+        if (!$force && $cachedPages > 0 && $knownPages !== null && $cachedPages === (int) $knownPages) {
             return [
-                'pages' => $this->labels->pageCount($sha256, $profile),
+                'pages' => $cachedPages,
                 'bytes' => 0,
                 'cached' => true,
                 'ms' => 0,

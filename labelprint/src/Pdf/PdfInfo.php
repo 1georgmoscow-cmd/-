@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace LabelPrint\Pdf;
 
+use LabelPrint\Support\Process;
+
 /**
  * Лёгкий разбор метаданных PDF: число страниц и размер страницы.
  *
@@ -47,14 +49,14 @@ final class PdfInfo
         return new self($pages, $w, $h, $encrypted, $rotate);
     }
 
-    public static function read(string $pdfPath, ?string $pdfinfoBinary = null): self
+    public static function read(string $pdfPath, ?string $pdfinfoBinary = null, int $timeoutSeconds = 10): self
     {
         if (!is_file($pdfPath)) {
             throw new \RuntimeException("PDF не найден: {$pdfPath}");
         }
 
         if ($pdfinfoBinary !== null && is_executable($pdfinfoBinary)) {
-            $info = self::viaPdfinfo($pdfPath, $pdfinfoBinary);
+            $info = self::viaPdfinfo($pdfPath, $pdfinfoBinary, $timeoutSeconds);
             if ($info !== null) {
                 return $info;
             }
@@ -82,22 +84,22 @@ final class PdfInfo
         return $this->widthPt !== null && $this->heightPt !== null && $this->widthPt > $this->heightPt;
     }
 
-    private static function viaPdfinfo(string $pdfPath, string $binary): ?self
+    private static function viaPdfinfo(string $pdfPath, string $binary, int $timeoutSeconds): ?self
     {
-        $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        // -box добавляет строки MediaBox/CropBox/TrimBox — они точнее «Page size».
-        $process = @proc_open([$binary, '-box', $pdfPath], $descriptors, $pipes);
-        if (!is_resource($process)) {
-            return null;
+        try {
+            // Именно через Process: pdfinfo на битом PDF сыплет сотнями килобайт
+            // «Syntax Error» в stderr, и наивное чтение сначала stdout, потом stderr
+            // намертво заклинивает пару процессов, причём SIGTERM это не разрывает.
+            // -box добавляет строки MediaBox/CropBox/TrimBox — они точнее «Page size».
+            $result = Process::run([$binary, '-box', $pdfPath], $timeoutSeconds);
+        } catch (\Throwable) {
+            return null;   // не запустился или завис — разберём файл сами
         }
 
-        $out = stream_get_contents($pipes[1]) ?: '';
-        $err = stream_get_contents($pipes[2]) ?: '';
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $code = proc_close($process);
+        $out = $result['stdout'];
+        $err = $result['stderr'];
 
-        if ($code !== 0) {
+        if ($result['code'] !== 0) {
             // Зашифрованный PDF pdfinfo отвергает — это полезный диагноз, а не сбой.
             if (stripos($err, 'encrypted') !== false) {
                 return self::make(0, null, null, true, 0);
@@ -113,6 +115,7 @@ final class PdfInfo
         if (preg_match('/^Pages:\s+(\d+)/mi', $out, $m) === 1) {
             $pages = (int) $m[1];
         }
+
         // MediaBox из «pdfinfo -box» точнее, чем «Page size»: последний показывает CropBox,
         // а Ghostscript по умолчанию рендерит именно MediaBox.
         if (preg_match('/^MediaBox:\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/mi', $out, $m) === 1) {
@@ -165,9 +168,22 @@ final class PdfInfo
         return self::make(max(0, $pages), $width, $height, $encrypted, $rotate);
     }
 
-    /** Распаковывает все FlateDecode-потоки: без этого объекты страниц не видны. */
+    /**
+     * Распаковывает FlateDecode-потоки: без этого объекты страниц не видны.
+     *
+     * Ограничения обязательны с обеих сторон. Сжатый поток в полтора мегабайта
+     * может развернуться в полтора гигабайта нулей — и это не теоретический
+     * случай, а тривиально собираемая «zip-бомба». Без предела на РАСПАКОВАННЫЙ
+     * размер процесс падает с фатальной ошибкой нехватки памяти, которую нельзя
+     * перехватить, то есть воркер умирает целиком.
+     */
     private static function inflateStreams(string $raw): string
     {
+        /** Предел на один распакованный поток. */
+        $perStream = 8 * 1024 * 1024;
+        /** Общий предел: чтобы найти /Type /Pages, /Count и первый /MediaBox, хватает с запасом. */
+        $totalBudget = 16 * 1024 * 1024;
+
         $out = '';
         $offset = 0;
         $budget = 64;   // не разворачиваем весь файл: нам хватит первых потоков
@@ -193,12 +209,17 @@ final class PdfInfo
                 continue;
             }
 
-            $inflated = @gzuncompress($chunk);
+            // Второй аргумент — жёсткий предел распакованного размера.
+            $inflated = @gzuncompress($chunk, $perStream);
             if ($inflated === false) {
-                $inflated = @gzinflate($chunk);
+                $inflated = @gzinflate($chunk, $perStream);
             }
             if (is_string($inflated) && $inflated !== '') {
                 $out .= "\n" . $inflated;
+            }
+
+            if (strlen($out) >= $totalBudget) {
+                break;
             }
         }
 

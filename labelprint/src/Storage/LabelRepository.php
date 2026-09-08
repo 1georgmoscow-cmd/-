@@ -129,6 +129,27 @@ final class LabelRepository
         )->rowCount();
     }
 
+    /**
+     * Удаляет этикетки, чей хэш содержимого не соответствует ни одному текущему файлу.
+     *
+     * Такие записи появляются, когда PDF перезаписывают по тому же пути: новая версия
+     * рендерится заново, а этикетки прошлой версии остаются. Кэш контент-адресуемый,
+     * поэтому удалять их сразу нельзя — тот же файл может вернуться под другим именем,
+     * и тогда рендеринг не понадобится. Но со временем они накапливаются, и эта
+     * уборка безопасно снимает те, на которые уже никто не ссылается.
+     *
+     * @return int сколько записей удалено
+     */
+    public function pruneOrphans(): int
+    {
+        return $this->db->run(
+            'DELETE l FROM zpl_labels l
+              WHERE NOT EXISTS (SELECT 1 FROM pdf_files f WHERE f.sha256 = l.pdf_sha256)',
+            [],
+            idempotent: true,
+        )->rowCount();
+    }
+
     /** @return array{labels:int,bytes:int,avg_bytes:int,avg_render_ms:int} */
     public function stats(): array
     {

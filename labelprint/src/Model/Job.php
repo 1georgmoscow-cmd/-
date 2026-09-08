@@ -17,6 +17,12 @@ final class Job
         public readonly int $attempts,
         public readonly int $maxAttempts,
         public readonly string $claimToken,
+        /**
+         * Число страниц исходного PDF по данным прошлого УСПЕШНОГО рендеринга.
+         * null означает «полного рендера ещё не было» — этого достаточно, чтобы
+         * отличить готовый результат от оборванного на середине.
+         */
+        public readonly ?int $pdfPageCount = null,
     ) {
     }
 
@@ -34,6 +40,7 @@ final class Job
             attempts: (int) $row['attempts'],
             maxAttempts: (int) $row['max_attempts'],
             claimToken: (string) ($row['claim_token'] ?? ''),
+            pdfPageCount: isset($row['page_count']) ? (int) $row['page_count'] : null,
         );
     }
 

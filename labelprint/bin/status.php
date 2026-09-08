@@ -15,7 +15,7 @@ use LabelPrint\App;
 use LabelPrint\Support\Args;
 
 try {
-    $options = Args::parse($argv, ['failures', 'retry-failed', 'retry-dead'], ['config']);
+    $options = Args::parse($argv, ['failures', 'retry-failed', 'retry-dead', 'prune'], ['config']);
 } catch (RuntimeException $e) {
     fwrite(STDERR, $e->getMessage() . "\n");
     exit(1);
@@ -25,6 +25,10 @@ $app = App::boot($options->value('config'));
 
 $jobs = $app->jobs();
 $labels = $app->labels();
+
+if ($options->has('prune')) {
+    printf("Удалено осиротевших этикеток: %d\n\n", $labels->pruneOrphans());
+}
 
 if ($options->has('retry-failed') || $options->has('retry-dead')) {
     printf("Возвращено в очередь: %d\n\n", $jobs->retryFailed(null, $options->has('retry-dead')));

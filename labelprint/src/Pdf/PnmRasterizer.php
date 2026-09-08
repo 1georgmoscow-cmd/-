@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace LabelPrint\Pdf;
 
 use LabelPrint\Support\Log;
+use LabelPrint\Support\Process;
 
 /**
  * Общая часть растеризаторов, читающих формат Netpbm из stdout внешней программы.
@@ -49,18 +50,19 @@ abstract class PnmRasterizer implements RasterizerInterface
         }
 
         $started = hrtime(true);
-        [$stdout, $stderr, $exitCode] = $this->run($this->buildCommand($pdfPath, $dpi));
+        $result = Process::run($this->buildCommand($pdfPath, $dpi), $this->timeoutSeconds);
+        [$stdout, $stderr, $exitCode] = [$result['stdout'], $result['stderr'], $result['code']];
         $elapsedMs = (int) ((hrtime(true) - $started) / 1_000_000);
 
         if ($exitCode !== 0) {
             throw new \RuntimeException(
-                sprintf('%s завершился с кодом %d: %s', $this->name(), $exitCode, $this->tail($stderr)),
+                sprintf('%s завершился с кодом %d: %s', $this->name(), $exitCode, Process::tail($stderr)),
             );
         }
 
         if ($stdout === '') {
             throw new \RuntimeException(
-                sprintf('%s не выдал ни одной страницы. %s', $this->name(), $this->tail($stderr)),
+                sprintf('%s не выдал ни одной страницы. %s', $this->name(), Process::tail($stderr)),
             );
         }
 
@@ -173,109 +175,6 @@ abstract class PnmRasterizer implements RasterizerInterface
             : $bitmap->bytesPerRow * $bitmap->height;
 
         return $pos + $body;
-    }
-
-    /**
-     * Запускает процесс, читая stdout и stderr одновременно.
-     *
-     * Читать надо именно параллельно: буфер канала в Linux — 64 КБ, и если выбирать
-     * только stdout, процесс намертво встанет на записи в переполненный stderr
-     * (или наоборот). Растр этикетки — это сотни килобайт, так что порог достигается легко.
-     *
-     * @param  list<string> $command
-     * @return array{0:string,1:string,2:int}
-     */
-    protected function run(array $command): array
-    {
-        $descriptors = [
-            0 => ['file', '/dev/null', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-
-        $process = @proc_open($command, $descriptors, $pipes);
-        if (!is_resource($process)) {
-            throw new \RuntimeException("Не удалось запустить {$this->name()}: {$this->binary}");
-        }
-
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
-
-        $stdout = '';
-        $stderr = '';
-        $deadline = microtime(true) + $this->timeoutSeconds;
-        $open = [1 => $pipes[1], 2 => $pipes[2]];
-
-        while ($open !== []) {
-            $read = array_values($open);
-            $write = null;
-            $except = null;
-
-            $remaining = $deadline - microtime(true);
-            if ($remaining <= 0) {
-                $this->terminate($process, $pipes);
-                throw new \RuntimeException(
-                    "{$this->name()} не уложился в {$this->timeoutSeconds} с и был остановлен",
-                );
-            }
-
-            $ready = @stream_select($read, $write, $except, (int) $remaining, 200_000);
-            if ($ready === false) {
-                break;
-            }
-
-            foreach ($read as $stream) {
-                $chunk = fread($stream, 262_144);
-                if ($chunk === false || $chunk === '') {
-                    if (feof($stream)) {
-                        foreach ($open as $key => $candidate) {
-                            if ($candidate === $stream) {
-                                fclose($stream);
-                                unset($open[$key]);
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if ($stream === $pipes[1]) {
-                    $stdout .= $chunk;
-                } else {
-                    $stderr .= $chunk;
-                }
-            }
-        }
-
-        foreach ($open as $stream) {
-            fclose($stream);
-        }
-
-        return [$stdout, $stderr, proc_close($process)];
-    }
-
-    /**
-     * @param resource            $process
-     * @param array<int,resource> $pipes
-     */
-    private function terminate($process, array $pipes): void
-    {
-        foreach ($pipes as $pipe) {
-            if (is_resource($pipe)) {
-                fclose($pipe);
-            }
-        }
-        proc_terminate($process, SIGKILL);
-        proc_close($process);
-    }
-
-    protected function tail(string $text, int $limit = 600): string
-    {
-        $text = trim($text);
-        if ($text === '') {
-            return '(stderr пуст)';
-        }
-
-        return strlen($text) > $limit ? '…' . substr($text, -$limit) : $text;
     }
 
     /** Дробное разрешение в виде строки: без запятой из локали и без экспоненты. */

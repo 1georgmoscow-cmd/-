@@ -399,14 +399,44 @@ return [
         assertContains('^PW464', $zpl, '58 мм при 203 dpi — 463, округлено до 464');
     },
 
-    'отпечаток профиля меняется только от значимых параметров' => static function (): void {
+    'отпечаток профиля учитывает всё, что попадает в ZPL' => static function (): void {
         $base = ['dpi' => 203, 'width_mm' => 100, 'height_mm' => 150];
 
         $a = PrinterProfile::fromArray('a', $base);
-        $sameParams = PrinterProfile::fromArray('b', $base + ['title' => 'другое имя', 'quantity' => 5]);
-        $otherDpi = PrinterProfile::fromArray('c', ['dpi' => 300] + $base);
 
-        assertSame($a->fingerprint(), $sameParams->fingerprint(), 'имя и тираж на растр не влияют');
-        assertTrue($a->fingerprint() !== $otherDpi->fingerprint(), 'разрешение влияет');
+        // code и title в вывод не попадают — на отпечаток влиять не должны.
+        $renamed = PrinterProfile::fromArray('b', $base + ['title' => 'другое имя']);
+        assertSame($a->fingerprint(), $renamed->fingerprint(), 'имя профиля на растр не влияет');
+
+        // Всё остальное попадает в байты задания и обязано менять отпечаток.
+        $variants = [
+            'разрешение' => ['dpi' => 300],
+            'ширина' => ['width_mm' => 58],
+            'высота' => ['height_mm' => 40],
+            'режим вписывания' => ['fit' => 'native'],
+            'поворот' => ['rotate' => 90],
+            'авто-поворот' => ['auto_rotate' => false],
+            'порог' => ['threshold' => 100],
+            'инверсия' => ['invert' => true],
+            'сжатие' => ['compression' => 'z64'],
+            'температура' => ['darkness' => 10],
+            'скорость' => ['print_rate' => 4],
+            'отслеживание носителя' => ['media_tracking' => 'mark'],
+            'режим печати' => ['print_mode' => 'cutter'],
+            'ширина головки' => ['printhead_dots' => 832],
+            'выравнивание ширины' => ['align_width_to_byte' => false],
+            'движок' => ['engine' => 'mupdf'],
+            // Тираж выводится командой ^PQ, то есть попадает в байты задания.
+            // Без него два профиля с разным числом копий делили бы одну запись кэша.
+            'тираж' => ['quantity' => 2],
+        ];
+
+        foreach ($variants as $what => $override) {
+            $other = PrinterProfile::fromArray('c', $override + $base);
+            assertTrue(
+                $a->fingerprint() !== $other->fingerprint(),
+                "{$what} должен менять отпечаток профиля",
+            );
+        }
     },
 ];

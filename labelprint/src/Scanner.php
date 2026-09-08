@@ -115,6 +115,8 @@ final class Scanner
                     profileCode: $code,
                     profileFingerprint: $profile->fingerprint(),
                     maxAttempts: $this->maxAttempts,
+                    // PDF, перезаписанный по тому же пути, обязан отрендериться заново.
+                    contentChanged: $file['changed'],
                 );
                 $enqueued++;
             }

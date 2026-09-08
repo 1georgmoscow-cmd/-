@@ -171,15 +171,21 @@ fwrite($socket, $zpl);
 fclose($socket);
 ```
 
-Найти файл можно и по имени:
+Найти файл можно и по имени. Условие `l.pdf_sha256 = f.sha256` обязательно:
+если PDF перезаписали по тому же пути, этикетки прошлой версии остаются в базе,
+и без этого условия запрос вернёт вперемешку старые и новые.
 
 ```sql
 SELECT l.zpl
   FROM zpl_labels l
   JOIN pdf_files f ON f.id = l.pdf_file_id
- WHERE f.path = '2026/09/wb-12345.pdf' AND l.profile_code = 'zebra_203_100x150'
+ WHERE f.path = '2026/09/wb-12345.pdf'
+   AND l.pdf_sha256 = f.sha256          -- только текущая версия файла
+   AND l.profile_code = 'zebra_203_100x150'
  ORDER BY l.page_no;
 ```
+
+Накопившиеся записи прошлых версий убираются командой `php bin/status.php --prune`.
 
 Колонка `zpl` — это `MEDIUMBLOB` с готовым потоком `^XA…^XZ`. Ничего добавлять
 или экранировать не нужно, задание самодостаточно.
@@ -191,6 +197,7 @@ php bin/doctor.php                                  # проверка окру�
 php bin/status.php --failures                       # состояние очереди и последние ошибки
 php bin/status.php --retry-failed                   # вернуть упавшие задания в очередь
 php bin/status.php --retry-dead                     # вернуть и тупиковые тоже
+php bin/status.php --prune                          # убрать этикетки старых версий файлов
 php bin/scan.php                                    # разовый обход каталога
 php bin/worker.php --once --with-scanner            # разобрать очередь и выйти (для cron)
 php bin/render.php label.pdf --stdout > label.zpl   # отрендерить один файл, не трогая базу
