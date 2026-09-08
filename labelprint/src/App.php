@@ -87,7 +87,7 @@ final class App
         return new RenderService(
             pdfDir: $this->config->string('pdf_dir'),
             rasterizer: $this->rasterizer(),
-            builder: new ZplLabelBuilder(),
+            builder: new ZplLabelBuilder($this->config->bool('render.verify_roundtrip', true)),
             labels: $this->labels(),
             files: $this->files(),
             log: $this->log('render'),

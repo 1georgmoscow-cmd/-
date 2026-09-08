@@ -41,6 +41,51 @@ final class ZplEncoder
     }
 
     /**
+     * Самопроверка: распаковывает только что собранное поле обратно и сверяет с исходным растром.
+     *
+     * Ошибка кодировщика проявляется не сразу, а на складе — сканер не берёт штрихкод
+     * на уже наклеенной этикетке. Обратная распаковка стоит несколько миллисекунд
+     * и ловит весь класс таких ошибок до записи в базу.
+     */
+    public static function verify(string $field, Bitmap $expected): void
+    {
+        try {
+            $decoded = self::decodeGraphicField($field, $expected->width);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(
+                'Самопроверка ^GFA не прошла: поле не удалось распаковать — ' . $e->getMessage(),
+                0,
+                $e,
+            );
+        }
+
+        if ($decoded->height !== $expected->height) {
+            throw new \RuntimeException(sprintf(
+                'Самопроверка ^GFA не прошла: после распаковки %d строк вместо %d',
+                $decoded->height,
+                $expected->height,
+            ));
+        }
+
+        if ($decoded->data !== $expected->data) {
+            $diff = 0;
+            $len = strlen($expected->data);
+            for ($i = 0; $i < $len; $i++) {
+                if ($decoded->data[$i] !== $expected->data[$i]) {
+                    $diff = $i;
+                    break;
+                }
+            }
+
+            throw new \RuntimeException(sprintf(
+                'Самопроверка ^GFA не прошла: данные разошлись с байта %d (строка %d)',
+                $diff,
+                intdiv($diff, max(1, $expected->bytesPerRow)),
+            ));
+        }
+    }
+
+    /**
      * Разбирает команду ^GFA обратно в растр — для тестов и для проверки
      * уже лежащего в базе ZPL.
      */

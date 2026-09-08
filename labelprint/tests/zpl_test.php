@@ -43,8 +43,19 @@ return [
     },
 
     'хвост строки сворачивается, начало кодируется' => static function (): void {
-        // Байт 0x80 = "80", дальше нули до конца строки.
-        assertSame('8,', AcsCompressor::compressRow('80' . str_repeat('0', 18)));
+        // Байт 0x80 = "80", дальше нули до конца строки: хвост из 19 нулей — нечётный,
+        // поэтому один ноль выводится литералом, и только остаток сворачивается.
+        assertSame('80,', AcsCompressor::compressRow('80' . str_repeat('0', 18)));
+    },
+
+    'перед запятой остаётся чётное число полубайт' => static function (): void {
+        // Чётный хвост сворачивается целиком.
+        assertSame('AABB,', AcsCompressor::compressRow('AABB' . str_repeat('0', 12)));
+        // Нечётный — один символ литералом, дальше запятая.
+        assertSame('AAB0,', AcsCompressor::compressRow('AAB' . str_repeat('0', 13)));
+        // То же правило для чёрного хвоста.
+        assertSame('AABB!', AcsCompressor::compressRow('AABB' . str_repeat('F', 12)));
+        assertSame('AABF!', AcsCompressor::compressRow('AAB' . str_repeat('F', 13)));
     },
 
     'короткие прогоны остаются литералами' => static function (): void {
@@ -52,9 +63,20 @@ return [
         assertSame('AABBCC', AcsCompressor::compressRow('AABBCC'));
     },
 
-    'хвост из нулей сворачивается даже после литералов' => static function (): void {
-        // Последний прогон — нули до конца строки, поэтому вместо них ','.
-        assertSame('AABBF,', AcsCompressor::compressRow('AABBF0'));
+    'одиночный ноль в конце не сворачивается' => static function (): void {
+        // Сворачивать один символ бессмысленно и запрещено правилом чётности.
+        assertSame('AABBF0', AcsCompressor::compressRow('AABBF0'));
+    },
+
+    'данные ACS никогда не начинаются с двоеточия' => static function (): void {
+        // Ведущее ':' — признак конверта :Z64:, принтер разберёт такие данные неверно.
+        foreach ([[8, 4], [16, 3], [800, 8]] as [$w, $h]) {
+            $bpr = intdiv($w + 7, 8);
+            foreach (["\x00", "\xFF", "\xA5"] as $fill) {
+                $packed = AcsCompressor::compress(str_repeat($fill, $bpr * $h), $bpr, $h);
+                assertTrue(!str_starts_with($packed, ':'), "растр {$w}x{$h}, заполнение " . bin2hex($fill));
+            }
+        }
     },
 
     'повтор строки сворачивается в двоеточие' => static function (): void {
@@ -142,6 +164,46 @@ return [
         }
     },
 
+    'самопроверка ловит испорченное поле' => static function (): void {
+        $bitmap = Bitmap::fromPbm((string) file_get_contents(__DIR__ . '/fixtures/frame_203x203.pbm'));
+        $field = ZplEncoder::graphicField($bitmap, PrinterProfile::COMPRESSION_ACS);
+
+        // Корректное поле проходит проверку молча.
+        ZplEncoder::verify($field, $bitmap);
+
+        // Сдвинутый счётчик повторов сдвигает всю строку — классическая ошибка кодировщика.
+        $broken = preg_replace('/,/', 'G0,', $field, 1);
+        try {
+            ZplEncoder::verify((string) $broken, $bitmap);
+            throw new RuntimeException('ожидалось исключение');
+        } catch (RuntimeException $e) {
+            assertContains('Самопроверка', $e->getMessage());
+        }
+    },
+
+    'самопроверка ловит неверное число строк' => static function (): void {
+        $bitmap = Bitmap::create(16, 4, str_repeat("\xA5", 8));
+        $field = ZplEncoder::graphicField($bitmap, PrinterProfile::COMPRESSION_HEX);
+
+        // Заявляем в заголовке больше байт, чем на самом деле.
+        $broken = preg_replace('/^\^GFA,8,8,2,/', '^GFA,10,10,2,', $field);
+        try {
+            ZplEncoder::verify((string) $broken, $bitmap);
+            throw new RuntimeException('ожидалось исключение');
+        } catch (RuntimeException $e) {
+            assertContains('Самопроверка', $e->getMessage());
+        }
+    },
+
+    'сборщик прогоняет самопроверку' => static function (): void {
+        $profile = PrinterProfile::fromArray('v', ['dpi' => 203, 'width_mm' => 58, 'height_mm' => 40]);
+        $bitmap = Bitmap::fromPbm((string) file_get_contents(__DIR__ . '/fixtures/barcode_400x120.pbm'));
+
+        // Не должно бросать: собранное поле обязано распаковываться обратно.
+        $zpl = (new ZplLabelBuilder(true))->build($bitmap, $profile);
+        assertContains('^GFA,', $zpl);
+    },
+
     'CRC16 сходится с контрольным вектором XMODEM' => static function (): void {
         assertSame(0x31C3, Z64Encoder::crc16('123456789'), 'эталонное значение CRC-16/XMODEM');
     },
@@ -192,15 +254,44 @@ return [
 
         assertTrue(str_starts_with($zpl, '^XA'), 'начинается с ^XA');
         assertTrue(str_ends_with($zpl, "^XZ\n"), 'заканчивается ^XZ');
+        assertContains('^JMA', $zpl, 'полное разрешение печати');
         assertContains('^LH0,0', $zpl, 'точка отсчёта сброшена');
+        assertContains('^LT0', $zpl, 'вертикальный сдвиг сброшен');
+        assertContains('^LS0', $zpl, 'горизонтальный сдвиг сброшен');
+        assertContains('^PON', $zpl, 'ориентация не перевёрнута');
         assertContains('^MNY', $zpl, 'отслеживание по просвету');
         assertContains('^MD10', $zpl, 'температура печати');
         assertContains('^PR4', $zpl, 'скорость печати');
-        assertContains('^PW799', $zpl, '100 мм при 203 dpi = 799 точек');
+        assertContains('^PW800', $zpl, '100 мм при 203 dpi = 799 точек, округлено до 800');
         assertContains('^LL1199', $zpl, '150 мм при 203 dpi = 1199 точек');
         assertContains('^FO0,0^GFA,', $zpl, 'графика в начале координат');
         assertContains('^FS', $zpl, 'поле закрыто');
-        assertContains('^PQ2', $zpl, 'две копии');
+        assertContains('^PQ2,0,0,N', $zpl, 'две копии');
+        assertContains('^MUd', $zpl, 'координаты в точках');
+        assertContains('^PMN', $zpl, 'зеркалирование выключено');
+        assertContains('^LRN', $zpl, 'негатив выключен');
+        assertContains('^MCY', $zpl, 'буфер очищается между этикетками');
+    },
+
+    'режим после печати' => static function (): void {
+        $bitmap = Bitmap::create(64, 8);
+        $builder = new ZplLabelBuilder();
+
+        assertContains('^MMT', $builder->build($bitmap, PrinterProfile::fromArray('t', ['print_mode' => 'tear'])));
+        assertContains('^MMC', $builder->build($bitmap, PrinterProfile::fromArray('c', ['print_mode' => 'cutter'])));
+        assertContains('^MMP', $builder->build($bitmap, PrinterProfile::fromArray('p', ['print_mode' => 'peel'])));
+
+        // По умолчанию команду не выводим: навязанный ^MMT сломал бы принтер с ножом.
+        assertTrue(!str_contains($builder->build($bitmap, PrinterProfile::fromArray('d', [])), '^MM'));
+    },
+
+    'неизвестный режим печати отвергается' => static function (): void {
+        try {
+            PrinterProfile::fromArray('bad', ['print_mode' => 'guillotine']);
+            throw new RuntimeException('ожидалось исключение');
+        } catch (InvalidArgumentException $e) {
+            assertContains('print_mode', $e->getMessage());
+        }
     },
 
     'непрерывная лента и чёрная метка' => static function (): void {
@@ -217,13 +308,44 @@ return [
     },
 
     'размер этикетки в точках' => static function (): void {
+        // Ширина округляется вверх до кратной 8, высота — нет: биты-заполнители
+        // бывают только в конце строки.
         $p = PrinterProfile::fromArray('x', ['dpi' => 203, 'width_mm' => 100, 'height_mm' => 150]);
-        assertSame(799, $p->widthDots(), '100 мм при 203 dpi');
+        assertSame(800, $p->widthDots(), '100 мм при 203 dpi — 799, округлено до 800');
         assertSame(1199, $p->heightDots(), '150 мм при 203 dpi');
 
+        $exact = PrinterProfile::fromArray('x2', [
+            'dpi' => 203, 'width_mm' => 100, 'height_mm' => 150, 'align_width_to_byte' => false,
+        ]);
+        assertSame(799, $exact->widthDots(), 'без округления — точное значение');
+
         $p300 = PrinterProfile::fromArray('y', ['dpi' => 300, 'width_mm' => 100, 'height_mm' => 150]);
-        assertSame(1181, $p300->widthDots(), '100 мм при 300 dpi');
+        assertSame(1184, $p300->widthDots(), '100 мм при 300 dpi — 1181, округлено до 1184');
         assertSame(1772, $p300->heightDots(), '150 мм при 300 dpi');
+    },
+
+    'растр шире головки отвергается до записи в базу' => static function (): void {
+        // 58-мм принтер: головка 464 точки, а профиль задан на 100 мм.
+        $profile = PrinterProfile::fromArray('narrow', [
+            'dpi' => 203, 'width_mm' => 100, 'height_mm' => 40, 'printhead_dots' => 464,
+        ]);
+
+        try {
+            (new ZplLabelBuilder())->build(Bitmap::create($profile->widthDots(), 100), $profile);
+            throw new RuntimeException('ожидалось исключение');
+        } catch (RuntimeException $e) {
+            assertContains('шире печатающей головки', $e->getMessage());
+            assertContains('464', $e->getMessage());
+        }
+    },
+
+    'растр по ширине головки проходит' => static function (): void {
+        $profile = PrinterProfile::fromArray('ok58', [
+            'dpi' => 203, 'width_mm' => 58, 'height_mm' => 40, 'printhead_dots' => 464,
+        ]);
+
+        $zpl = (new ZplLabelBuilder())->build(Bitmap::create($profile->widthDots(), 320), $profile);
+        assertContains('^PW464', $zpl, '58 мм при 203 dpi — 463, округлено до 464');
     },
 
     'отпечаток профиля меняется только от значимых параметров' => static function (): void {

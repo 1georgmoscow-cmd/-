@@ -22,6 +22,8 @@ return [
         'darkness' => null,          // ^MD: null — не менять настройку принтера
         'print_rate' => null,        // ^PR
         'media_tracking' => 'gap',   // gap | mark | continuous | null
+        'print_mode' => null,        // tear | peel | cutter | rewind | applicator | null
+        'auto_rotate' => true,       // довернуть на 90, если страница лежит боком
         'quantity' => 1,
     ],
 

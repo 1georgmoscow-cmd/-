@@ -14,6 +14,15 @@ final class PrinterProfile
     public const FIT_NATIVE = 'native';
     public const FIT_FIT = 'fit';
 
+    /** Режимы ^MM: наше название => буква ZPL. */
+    public const PRINT_MODES = [
+        'tear' => 'T',
+        'peel' => 'P',
+        'rewind' => 'R',
+        'applicator' => 'A',
+        'cutter' => 'C',
+    ];
+
     public const COMPRESSION_HEX = 'hex';
     public const COMPRESSION_ACS = 'acs';
     public const COMPRESSION_Z64 = 'z64';
@@ -48,6 +57,27 @@ final class PrinterProfile
         public readonly ?string $mediaTracking = 'gap',
         /** Количество копий в задании (^PQ). */
         public readonly int $quantity = 1,
+        /**
+         * Режим после печати (^MM): tear | peel | cutter | rewind | applicator.
+         * null — не трогать настройку принтера. Задавать стоит, если в парке
+         * есть принтеры с ножом: чужой ^MMP от прошлого задания подвешивает
+         * печать в ожидании, пока этикетку снимут.
+         */
+        public readonly ?string $printMode = null,
+        /**
+         * Ширина печатающей головки в точках. Если растр окажется шире, принтер
+         * молча обрежет правый край — обычно вместе со штрихкодом. Ошибка на этапе
+         * рендеринга лучше, чем пачка нечитаемых этикеток. null — не проверять.
+         * Ориентиры: 4 дюйма — 832 точки при 203 dpi и 1248 при 300 dpi;
+         * 58 мм — 464 точки при 203 dpi.
+         */
+        public readonly ?int $printheadDots = null,
+        /**
+         * Округлять ширину этикетки вверх до кратной 8. Тогда в строке растра
+         * не остаётся неопределённых бит-заполнителей, а ^PW точно совпадает
+         * с шириной данных. Прибавка не больше 7 точек — это 0,9 мм при 203 dpi.
+         */
+        public readonly bool $alignWidthToByte = true,
     ) {
         if ($this->dpi <= 0) {
             throw new \InvalidArgumentException("Профиль {$code}: dpi должен быть положительным");
@@ -73,6 +103,12 @@ final class PrinterProfile
         if ($this->quantity < 1) {
             throw new \InvalidArgumentException("Профиль {$code}: quantity должен быть не меньше 1");
         }
+        if ($this->printMode !== null && !isset(self::PRINT_MODES[$this->printMode])) {
+            throw new \InvalidArgumentException(
+                "Профиль {$code}: print_mode должен быть одним из "
+                . implode(', ', array_keys(self::PRINT_MODES)) . ' или null',
+            );
+        }
     }
 
     /** @param array<string,mixed> $data */
@@ -96,6 +132,9 @@ final class PrinterProfile
                 ? ($data['media_tracking'] === null ? null : (string) $data['media_tracking'])
                 : 'gap',
             quantity: (int) ($data['quantity'] ?? 1),
+            printMode: isset($data['print_mode']) ? (string) $data['print_mode'] : null,
+            printheadDots: isset($data['printhead_dots']) ? (int) $data['printhead_dots'] : null,
+            alignWidthToByte: (bool) ($data['align_width_to_byte'] ?? true),
         );
     }
 
@@ -108,7 +147,9 @@ final class PrinterProfile
     /** Ширина этикетки в точках принтера. */
     public function widthDots(): int
     {
-        return (int) round($this->widthMm / 25.4 * $this->dpi);
+        $dots = (int) round($this->widthMm / 25.4 * $this->dpi);
+
+        return $this->alignWidthToByte ? intdiv($dots + 7, 8) * 8 : $dots;
     }
 
     /** Высота этикетки в точках принтера. */
@@ -136,6 +177,9 @@ final class PrinterProfile
             $this->darkness,
             $this->printRate,
             $this->mediaTracking,
+            $this->printMode,
+            $this->printheadDots,
+            $this->alignWidthToByte,
         ], JSON_THROW_ON_ERROR)), 0, 16);
     }
 }
