@@ -41,6 +41,13 @@ final class Scanner
         private readonly array $extensions = ['pdf'],
         private readonly bool $recursive = true,
         private readonly int $maxAttempts = 3,
+        /**
+         * Регулярное выражение с одной скобкой захвата, по которому из ИМЕНИ файла
+         * достаётся номер отправления. По умолчанию — имя без расширения, то есть
+         * файл 0494051806-0963-1.pdf даёт номер 0494051806-0963-1.
+         * null — не выводить номер из имени вовсе.
+         */
+        private readonly ?string $postingIdPattern = '/^(.+)\.pdf$/i',
     ) {
         if ($this->profileCodes === []) {
             throw new \InvalidArgumentException('Сканеру не задано ни одного профиля');
@@ -105,7 +112,7 @@ final class Scanner
                 continue;
             }
 
-            $file = $this->files->upsert($relative, $sha256, $size, $mtime);
+            $file = $this->files->upsert($relative, $sha256, $size, $mtime, $this->postingId($relative));
             unset($this->pending[$relative]);
 
             foreach ($this->profileCodes as $code) {
@@ -134,6 +141,24 @@ final class Scanner
         $this->pending = array_intersect_key($this->pending, $seen);
 
         return ['scanned' => $scanned, 'enqueued' => $enqueued, 'skipped' => $skipped];
+    }
+
+    /** Достаёт номер отправления из имени файла по настроенному шаблону. */
+    private function postingId(string $relativePath): ?string
+    {
+        if ($this->postingIdPattern === null) {
+            return null;
+        }
+
+        $name = basename($relativePath);
+
+        if (preg_match($this->postingIdPattern, $name, $m) !== 1) {
+            return null;
+        }
+
+        $postingId = trim($m[1] ?? '');
+
+        return $postingId === '' ? null : mb_substr($postingId, 0, 128);
     }
 
     /**

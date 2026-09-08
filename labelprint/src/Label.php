@@ -6,7 +6,15 @@ namespace LabelPrint;
 /** Готовая к печати этикетка со всем, что нужно прикладному коду. */
 final class Label
 {
-    /** @param list<string> $codes значения распознанных на этикетке кодов */
+    /**
+     * Распознанный код этикетки — то самое, что вернёт сканер при проверке.
+     *
+     * У этикетки OZON он ровно один (QR). Если кодов почему-то несколько,
+     * здесь лежит первый, а полный список — в свойстве codes.
+     */
+    public readonly ?string $barcode;
+
+    /** @param list<string> $codes значения всех распознанных кодов */
     public function __construct(
         /** Идентификатор строки в zpl_labels — с ним делается сверка после наклейки. */
         public readonly int $id,
@@ -19,17 +27,33 @@ final class Label
         public readonly int $heightDots,
         public readonly string $profileCode,
         public readonly array $codes,
+        /** Номер отправления, если он известен. */
+        public readonly ?string $postingId = null,
     ) {
-    }
-
-    /** Первый распознанный код — то, что вернёт сканер при проверке. */
-    public function code(): ?string
-    {
-        return $this->codes[0] ?? null;
+        $this->barcode = $codes[0] ?? null;
     }
 
     public function hasCodes(): bool
     {
         return $this->codes !== [];
+    }
+
+    /** Представление для JSON-ответа или лога. */
+    public function toArray(): array
+    {
+        return [
+            'id' => $this->id,
+            'posting_id' => $this->postingId,
+            'page_no' => $this->pageNo,
+            'barcode' => $this->barcode,
+            'codes' => $this->codes,
+            'zpl' => $this->zpl,
+            'zpl_bytes' => strlen($this->zpl),
+            'dpi' => $this->dpi,
+            'width_dots' => $this->widthDots,
+            'height_dots' => $this->heightDots,
+            'profile' => $this->profileCode,
+            'path' => $this->path,
+        ];
     }
 }

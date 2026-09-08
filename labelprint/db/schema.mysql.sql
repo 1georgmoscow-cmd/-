@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS `pdf_files` (
     `path`          VARBINARY(1024) NOT NULL,
     -- SHA-1 от пути: короткий ключ уникальности вместо индекса на 1024 байта.
     `path_sha1`     CHAR(40)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- Номер отправления маркетплейса (posting_id у OZON). Именно по нему
+    -- прикладной код обращается за этикеткой: имя файла ему знать неоткуда.
+    -- Заполняется либо явно при передаче PDF, либо выводится из имени файла.
+    `posting_id`    VARCHAR(128)    CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
     -- SHA-256 содержимого: именно он делает кэш контент-адресуемым.
     -- ascii_bin вместо utf8mb4: 64 байта на значение вместо 256, вчетверо меньше индекс.
     `sha256`        CHAR(64)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -35,6 +39,7 @@ CREATE TABLE IF NOT EXISTS `pdf_files` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_pdf_path` (`path_sha1`),
     KEY `idx_pdf_sha256` (`sha256`),
+    KEY `idx_pdf_posting` (`posting_id`),
     KEY `idx_pdf_seen` (`first_seen_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

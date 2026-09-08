@@ -17,11 +17,16 @@ final class PdfFileRepository
      *
      * @return array{id:int,changed:bool} changed=true, если файл новый или его содержимое поменялось
      */
-    public function upsert(string $relativePath, string $sha256, int $sizeBytes, int $mtime): array
-    {
+    public function upsert(
+        string $relativePath,
+        string $sha256,
+        int $sizeBytes,
+        int $mtime,
+        ?string $postingId = null,
+    ): array {
         $pathSha1 = sha1($relativePath);
         $existing = $this->db->fetchOne(
-            'SELECT id, sha256 FROM pdf_files WHERE path_sha1 = ?',
+            'SELECT id, sha256, posting_id FROM pdf_files WHERE path_sha1 = ?',
             [$pathSha1],
         );
 
@@ -42,12 +47,13 @@ final class PdfFileRepository
         }
 
         $this->db->run(
-            'INSERT INTO pdf_files (path, path_sha1, sha256, size_bytes, mtime)
-             VALUES (?, ?, ?, ?, ?)
+            'INSERT INTO pdf_files (path, path_sha1, sha256, size_bytes, mtime, posting_id)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 sha256 = VALUES(sha256), size_bytes = VALUES(size_bytes), mtime = VALUES(mtime),
+                posting_id = COALESCE(VALUES(posting_id), pdf_files.posting_id),
                 id = LAST_INSERT_ID(pdf_files.id)',
-            [$relativePath, $pathSha1, $sha256, $sizeBytes, $mtime],
+            [$relativePath, $pathSha1, $sha256, $sizeBytes, $mtime, $postingId],
             idempotent: true,
         );
 
@@ -63,6 +69,20 @@ final class PdfFileRepository
     public function findByPath(string $relativePath): ?array
     {
         return $this->db->fetchOne('SELECT * FROM pdf_files WHERE path_sha1 = ?', [sha1($relativePath)]);
+    }
+
+    /**
+     * Файл по номеру отправления. Если под одним номером оказалось несколько
+     * файлов (перезалили под другим именем), берётся самый свежий.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByPostingId(string $postingId): ?array
+    {
+        return $this->db->fetchOne(
+            'SELECT * FROM pdf_files WHERE posting_id = ? ORDER BY id DESC LIMIT 1',
+            [$postingId],
+        );
     }
 
     /** @return array<string,mixed>|null */

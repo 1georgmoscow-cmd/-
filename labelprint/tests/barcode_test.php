@@ -1,12 +1,14 @@
 <?php
 declare(strict_types=1);
 
+use LabelPrint\Api;
 use LabelPrint\Barcode\CodeReader;
 use LabelPrint\Barcode\CodeReaderInterface;
 use LabelPrint\Barcode\DecodedCode;
 use LabelPrint\Barcode\SelfTest;
 use LabelPrint\Barcode\ZbarReader;
 use LabelPrint\Pdf\Bitmap;
+use LabelPrint\Label;
 use LabelPrint\Support\Log;
 
 /** Подставной zbarimg: печатает заранее заданный XML. */
@@ -36,6 +38,65 @@ function zbarXml(string $symbols): string
 $tiny = Bitmap::create(64, 64);
 
 return [
+    'номер отправления не может увести запись из каталога' => static function (): void {
+        // Номер приходит из внешней системы и превращается в имя файла,
+        // поэтому проверка строгая.
+        $bad = [
+            '../../etc/passwd',
+            '0494/../../../tmp/x',
+            '..%2Fetc',
+            'a/b',
+            '',
+            '   ',
+            str_repeat('9', 200),
+            'номер-кириллицей',
+        ];
+
+        foreach ($bad as $value) {
+            try {
+                Api::safePostingId($value);
+                throw new RuntimeException('должно было быть отклонено: ' . $value);
+            } catch (InvalidArgumentException) {
+                // ожидаемо
+            }
+        }
+    },
+
+    'корректный номер отправления принимается' => static function (): void {
+        foreach (['0494051806-0963-1', 'ABC_123', 'x.y-z', '11036'] as $value) {
+            assertSame($value, Api::safePostingId($value), "номер {$value}");
+        }
+
+        assertSame('0494051806-0963-1', Api::safePostingId('  0494051806-0963-1  '), 'пробелы обрезаются');
+    },
+
+    'у этикетки есть barcode и полный список кодов' => static function (): void {
+        $label = new Label(
+            id: 7,
+            path: 'ozon.pdf',
+            pageNo: 1,
+            zpl: '^XA^XZ',
+            dpi: 203,
+            widthDots: 464,
+            heightDots: 320,
+            profileCode: 'ozon_203_58x40',
+            codes: ['751466115153000', 'SECOND'],
+            postingId: '0494051806-0963-1',
+        );
+
+        assertSame('751466115153000', $label->barcode, 'barcode — первый распознанный код');
+        assertSame(2, count($label->codes));
+        assertTrue($label->hasCodes());
+        assertSame('0494051806-0963-1', $label->toArray()['posting_id']);
+    },
+
+    'этикетка без кодов честно сообщает об этом' => static function (): void {
+        $label = new Label(1, 'x.pdf', 1, '^XA^XZ', 203, 464, 320, 'p', []);
+
+        assertTrue($label->barcode === null);
+        assertTrue(!$label->hasCodes());
+    },
+
     'нормализация убирает разделитель GS' => static function (): void {
         // Код «Честного знака»: между полями стоит GS (0x1D).
         $raw = "0104607428561111" . "21AbCdE" . "\x1D" . "93dGVz";

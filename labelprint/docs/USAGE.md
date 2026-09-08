@@ -1,14 +1,15 @@
 # Как пользоваться из своего PHP-кода
 
-## Установка, один раз
+## Установка
+
+Пошагово — [docs/INSTALL.md](INSTALL.md). Коротко:
 
 ```bash
 sudo bash deploy/install.sh              # пакеты, копирование в /opt/labelprint, юниты
-mysql -u root -p < db/schema.mysql.sql   # база и таблицы
+sudo mysql < db/schema.mysql.sql         # база и таблицы
 cd /opt/labelprint
-cp config/config.example.php config/config.php
-cp config/printers.example.php config/printers.php
-$EDITOR config/config.php                # доступ к базе, путь к PDF, профиль по умолчанию
+sudo cp config/config.example.php config/config.php
+sudo nano config/config.php              # доступ к базе, путь к PDF, профиль
 php bin/doctor.php                       # проверка окружения
 sudo systemctl enable --now labelprint-scanner labelprint-worker@{1..4}
 ```
@@ -26,39 +27,64 @@ require '/opt/labelprint/src/bootstrap.php';
 $api = LabelPrint\Api::boot();
 ```
 
-## Четыре операции — это всё, что нужно
-
-### 1. Взять готовый ZPL
+## Главное: этикетка по номеру отправления OZON
 
 ```php
-// Путь ОТНОСИТЕЛЬНО pdf_dir из конфига.
-$label = $api->label('2026/09/ozon-12345.pdf');
+$label = $api->savePosting($postingId, $pdfBytes);   // PDF скачан из API OZON
 
-$label->zpl;          // готовые байты ^XA…^XZ
-$label->code();       // '751466115153000' — то, что вернёт сканер
-$label->id;           // понадобится для сверки
-$label->widthDots;    // 464
-$label->heightDots;   // 320
+$zpl     = $label->zpl;       // текст этикетки на языке ZPL
+$barcode = $label->barcode;   // распознанный QR, например '751466115153000'
 ```
 
-Обычно этикетку уже отрендерил воркер, и это просто чтение строки из MySQL —
-**около 5 мс**. Если файл появился секунду назад и ждать воркер некогда:
+Это один вызов: PDF сохраняется в `pdf_dir`, привязывается к номеру, рендерится
+в ZPL, на растре распознаётся QR. **Около 365 мс.** Повторный вызов с тем же
+файлом ничего не пересчитывает.
+
+Если PDF уже лежит в `pdf_dir`:
 
 ```php
-$label = $api->label('ozon.pdf', renderIfMissing: true);   // отрендерит здесь же, ~390 мс
+$label = $api->byPosting('0494051806-0963-1');   // ~1 мс из кэша
 ```
 
-Многостраничный файл:
+Связь «номер ↔ файл» устанавливается двумя способами:
+
+* **явно** — `savePosting($postingId, $pdf)`. Надёжнее: имя файла из API OZON
+  служебное (`print_to_sticker_11036.pdf`) и номера в себе не содержит;
+* **по имени файла** — если положить его как `0494051806-0963-1.pdf`, сканер
+  свяжет сам (шаблон настраивается: `scanner.posting_id_pattern`).
+
+Номер отправления проверяется строго — только буквы, цифры, точка, дефис и
+подчёркивание. Значение вида `../../etc/passwd` отклоняется: оно превращается
+в имя файла.
+
+Что ещё есть в `$label`:
 
 ```php
-foreach ($api->labels('multi.pdf') as $label) { /* … */ }
+$label->id;            // для сверки со сканером
+$label->postingId;
+$label->codes;         // все распознанные коды (у OZON он один)
+$label->widthDots;     // 464
+$label->heightDots;    // 320
+$label->dpi;           // 203
+$label->toArray();     // готово к json_encode
+```
+
+Многостраничный файл: `$api->pagesByPosting($postingId)`.
+
+## Остальные операции
+
+### 1. Взять этикетку по пути к файлу
+
+```php
+$label = $api->label('2026/09/ozon-12345.pdf');            // путь относительно pdf_dir
+$label = $api->label('ozon.pdf', renderIfMissing: true);   // отрендерить, если ещё нет
 $api->zpl('multi.pdf');                                    // все страницы одной строкой
 ```
 
 ### 2. Проверить до печати
 
 ```php
-if (!$label->hasCodes()) {
+if ($label->barcode === null) {
     // На этикетке не распознан ни один код — сканер её не подтвердит.
     // Узнать об этом лучше сейчас, чем когда она уже на коробке.
 }
@@ -105,27 +131,31 @@ foreach ($api->findByCode($scanned) as $found) {
 }
 ```
 
-## Полный пример
-
-`examples/workflow.php` — весь процесс с комментариями:
+## Полные примеры
 
 ```bash
+php examples/ozon.php 0494051806-0963-1 /tmp/скачанный.pdf 192.168.1.50
 php examples/workflow.php ozon.pdf 192.168.1.50
 ```
 
 ## Если не хотите использовать классы
 
-Всё то же самое доступно обычными запросами. Взять ZPL:
+Всё то же самое доступно обычными запросами. Взять ZPL и код:
 
 ```sql
-SELECT l.id, l.zpl
+-- По номеру отправления
+SELECT l.id, l.zpl, c.value AS barcode
   FROM zpl_labels l
-  JOIN pdf_files f ON f.id = l.pdf_file_id
- WHERE f.path = ?
-   AND l.pdf_sha256 = f.sha256           -- обязательно: только текущая версия файла
+  LEFT JOIN label_codes c ON c.zpl_label_id = l.id
+ WHERE l.pdf_sha256 = (SELECT sha256 FROM pdf_files WHERE posting_id = ? ORDER BY id DESC LIMIT 1)
    AND l.profile_code = ?
  ORDER BY l.page_no;
 ```
+
+Искать надо именно по `pdf_sha256`, а не соединением по `pdf_file_id`. Кэш
+контент-адресуемый: два отправления с побайтово одинаковой этикеткой делят одну
+строку в `zpl_labels`, и соединение по идентификатору файла нашло бы её только
+для того, что отрендерился последним.
 
 Сверить со сканером:
 
@@ -147,6 +177,8 @@ fclose($socket);
 
 | Операция | Время |
 |---|---|
+| `byPosting()` — готовая этикетка по номеру | ~1 мс |
+| `savePosting()` — приём PDF, рендеринг, распознавание | ~365 мс |
 | Чтение готового ZPL из MySQL | ~5 мс |
 | Рендеринг «на месте», если в кэше нет | ~390 мс |
 | Отправка на сетевой принтер | ~0,5 мс |

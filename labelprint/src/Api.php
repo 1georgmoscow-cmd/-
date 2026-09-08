@@ -35,6 +35,111 @@ final class Api
     }
 
     /**
+     * Этикетка по номеру отправления OZON.
+     *
+     *   $label = $api->byPosting('0494051806-0963-1');
+     *   $label->zpl;       // текст этикетки на языке ZPL
+     *   $label->barcode;   // распознанный QR — для сверки после наклейки
+     *
+     * Номер связывается с файлом двумя способами: сканер выводит его из имени
+     * файла (по шаблону scanner.posting_id_pattern), либо он задаётся явно
+     * через savePosting() — так надёжнее, потому что имя файла из API OZON
+     * приходит служебным вроде print_to_sticker_11036.pdf.
+     */
+    public function byPosting(string $postingId, ?string $profile = null, bool $renderIfMissing = true): ?Label
+    {
+        $file = $this->app->files()->findByPostingId($postingId);
+        if ($file === null) {
+            return null;
+        }
+
+        return $this->label((string) $file['path'], $profile, $renderIfMissing);
+    }
+
+    /**
+     * Все страницы отправления.
+     *
+     * @return list<Label>
+     */
+    public function pagesByPosting(string $postingId, ?string $profile = null, bool $renderIfMissing = true): array
+    {
+        $file = $this->app->files()->findByPostingId($postingId);
+
+        return $file === null ? [] : $this->labels((string) $file['path'], $profile, $renderIfMissing);
+    }
+
+    /**
+     * Принимает PDF от OZON и сразу возвращает готовую этикетку.
+     *
+     * Основной способ для прикладного кода: вы скачали PDF из API OZON по
+     * номеру отправления и передаёте байты сюда. Файл ляжет в pdf_dir, номер
+     * будет привязан явно, этикетка отрендерится и вернётся вместе с кодом.
+     *
+     *   $pdf = ozon_api_get_label($postingId);        // ваш код
+     *   $label = $api->savePosting($postingId, $pdf);
+     *   $label->zpl;
+     *   $label->barcode;
+     *
+     * Повторный вызов с тем же содержимым ничего не пересчитывает: результат
+     * берётся из кэша по хэшу файла.
+     *
+     * @param string $pdf     содержимое PDF (байты) либо путь к готовому файлу
+     * @param bool   $replace перезаписать, если файл под этим номером уже есть
+     */
+    public function savePosting(
+        string $postingId,
+        string $pdf,
+        ?string $profile = null,
+        bool $replace = true,
+    ): Label {
+        $safe = self::safePostingId($postingId);
+        $bytes = self::pdfBytes($pdf);
+
+        $dir = rtrim($this->app->config->string('pdf_dir'), '/');
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new \RuntimeException("Каталог для PDF недоступен: {$dir}");
+        }
+
+        $relative = $safe . '.pdf';
+        $absolute = $dir . '/' . $relative;
+
+        if (!$replace && is_file($absolute)) {
+            $existing = $this->byPosting($postingId, $profile);
+            if ($existing !== null) {
+                return $existing;
+            }
+        }
+
+        // Пишем во временное имя и переименовываем: rename() в пределах одной
+        // файловой системы атомарен, поэтому сканер физически не может увидеть
+        // недописанный файл и попытаться его отрендерить.
+        $temp = $absolute . '.part';
+        if (@file_put_contents($temp, $bytes) !== strlen($bytes)) {
+            @unlink($temp);
+            throw new \RuntimeException("Не удалось записать {$temp}");
+        }
+        if (!@rename($temp, $absolute)) {
+            @unlink($temp);
+            throw new \RuntimeException("Не удалось переименовать {$temp} в {$absolute}");
+        }
+
+        $stat = stat($absolute);
+        $sha256 = hash_file('sha256', $absolute);
+        if ($sha256 === false || $stat === false) {
+            throw new \RuntimeException("Не удалось прочитать записанный файл {$absolute}");
+        }
+
+        $this->app->files()->upsert($relative, $sha256, (int) $stat['size'], (int) $stat['mtime'], $safe);
+
+        $label = $this->label($relative, $profile, renderIfMissing: true);
+        if ($label === null) {
+            throw new \RuntimeException("Этикетка для отправления {$postingId} не отрендерилась");
+        }
+
+        return $label;
+    }
+
+    /**
      * Готовая этикетка: первая страница файла.
      *
      * @param string $path            путь относительно pdf_dir, например '2026/09/ozon.pdf'
@@ -56,12 +161,18 @@ final class Api
     {
         $printerProfile = $this->profile($profile);
         $rows = $this->rows($path, $printerProfile);
+        $postingId = null;
 
         if ($rows === [] && $renderIfMissing) {
             // Синхронный рендеринг: нужен, когда файл только что появился,
             // а печатать надо сию секунду, не дожидаясь воркера.
             $this->app->renderer()->renderFile($path, $printerProfile);
             $rows = $this->rows($path, $printerProfile);
+        }
+
+        if ($rows !== []) {
+            $file = $this->app->files()->findByPath($path);
+            $postingId = ($file['posting_id'] ?? null) === null ? null : (string) $file['posting_id'];
         }
 
         $codes = $this->app->codeStore();
@@ -80,8 +191,54 @@ final class Api
                     static fn(array $c): string => (string) $c['value'],
                     $codes->forLabel((int) $row['id']),
                 ),
+                postingId: $postingId,
             ),
             $rows,
+        );
+    }
+
+    /**
+     * Приводит номер отправления к безопасному имени файла.
+     *
+     * Номер приходит из внешней системы и превращается в путь, поэтому
+     * проверка строгая: только буквы, цифры, точка, дефис и подчёркивание.
+     * Иначе значение вида ../../etc/passwd увело бы запись за пределы каталога.
+     */
+    public static function safePostingId(string $postingId): string
+    {
+        $safe = trim($postingId);
+
+        if ($safe === '' || strlen($safe) > 128) {
+            throw new \InvalidArgumentException('Номер отправления пуст или длиннее 128 символов');
+        }
+
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $safe) !== 1 || str_contains($safe, '..')) {
+            throw new \InvalidArgumentException(
+                "Недопустимый номер отправления '{$postingId}': разрешены буквы, цифры, точка, дефис и подчёркивание",
+            );
+        }
+
+        return $safe;
+    }
+
+    /** Принимает либо содержимое PDF, либо путь к нему. */
+    private static function pdfBytes(string $pdfOrPath): string
+    {
+        if (str_starts_with($pdfOrPath, '%PDF-')) {
+            return $pdfOrPath;
+        }
+
+        if (is_file($pdfOrPath)) {
+            $bytes = file_get_contents($pdfOrPath);
+            if ($bytes === false) {
+                throw new \RuntimeException("Не удалось прочитать {$pdfOrPath}");
+            }
+
+            return $bytes;
+        }
+
+        throw new \InvalidArgumentException(
+            'Ожидалось содержимое PDF (начинается с %PDF-) или путь к существующему файлу',
         );
     }
 
@@ -160,18 +317,30 @@ final class Api
         return $this->app->codeStore()->findByValue($scanned, $limit);
     }
 
-    /** @return list<array<string,mixed>> */
+    /**
+     * Строки готовых этикеток для файла.
+     *
+     * Поиск идёт по ХЭШУ СОДЕРЖИМОГО, а не по идентификатору файла. Кэш
+     * контент-адресуемый: две записи pdf_files с побайтово одинаковым PDF
+     * (например, два отправления с одинаковой этикеткой, или один файл,
+     * положенный под двумя именами) делят одну строку в zpl_labels. Соединение
+     * по pdf_file_id находило бы её только для того файла, который отрендерился
+     * последним, а для остальных возвращало пусто — при том что этикетка есть.
+     *
+     * @return list<array<string,mixed>>
+     */
     private function rows(string $path, PrinterProfile $profile): array
     {
+        $file = $this->app->files()->findByPath($path);
+        if ($file === null) {
+            return [];
+        }
+
         return $this->app->db()->fetchAll(
-            'SELECT l.*
-               FROM zpl_labels l
-               JOIN pdf_files f ON f.id = l.pdf_file_id
-              WHERE f.path = ?
-                AND l.pdf_sha256 = f.sha256
-                AND l.profile_fingerprint = ?
-              ORDER BY l.page_no',
-            [$path, $profile->fingerprint()],
+            'SELECT * FROM zpl_labels
+              WHERE pdf_sha256 = ? AND profile_fingerprint = ?
+              ORDER BY page_no',
+            [(string) $file['sha256'], $profile->fingerprint()],
         );
     }
 

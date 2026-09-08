@@ -119,6 +119,9 @@ final class App
             extensions: array_values(array_map('strval', $this->config->array('scanner.extensions') ?: ['pdf'])),
             recursive: $this->config->bool('scanner.recursive', true),
             maxAttempts: $this->config->int('worker.max_attempts', 3),
+            postingIdPattern: $this->config->get('scanner.posting_id_pattern', '/^(.+)\.pdf$/i') === null
+                ? null
+                : $this->config->string('scanner.posting_id_pattern', '/^(.+)\.pdf$/i'),
         );
     }
 

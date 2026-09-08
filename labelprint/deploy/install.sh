@@ -13,7 +13,7 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     php-cli php-mysql php-mbstring php-zip \
     ghostscript poppler-utils mupdf-tools \
-    zbar-tools dmtx-utils
+    zbar-tools dmtx-utils acl
 
 echo "==> Копирование в ${TARGET}"
 mkdir -p "${TARGET}"

@@ -238,18 +238,25 @@ SELECT 1 FROM label_codes
 
 ## Встраивание в свой код
 
-Короткая инструкция — [docs/USAGE.md](docs/USAGE.md), рабочий пример —
-[examples/workflow.php](examples/workflow.php). Кратко:
+Установка по шагам — [docs/INSTALL.md](docs/INSTALL.md), использование —
+[docs/USAGE.md](docs/USAGE.md), примеры — [examples/](examples/). Кратко:
 
 ```php
 require '/opt/labelprint/src/bootstrap.php';
 
 $api = LabelPrint\Api::boot();
 
-$label = $api->label('2026/09/ozon-12345.pdf');   // готовый ZPL из MySQL, ~5 мс
-$api->send($label->zpl, '192.168.1.50');          // печать, ~0,5 мс
-$api->verify($label->id, $scanned);               // сверка со сканером после наклейки
+// PDF скачан из API OZON по номеру отправления
+$label = $api->savePosting($postingId, $pdfBytes);
+
+$zpl     = $label->zpl;       // текст этикетки на языке ZPL
+$barcode = $label->barcode;   // распознанный QR для сверки, '751466115153000'
+
+$api->send($zpl, '192.168.1.50');          // печать, ~0,5 мс
+$api->verify($label->id, $scanned);        // сверка после наклейки
 ```
+
+Повторно по номеру — `$api->byPosting($postingId)`, около 1 мс из кэша.
 
 ## Как забрать ZPL и напечатать
 
@@ -272,19 +279,35 @@ fwrite($socket, $zpl);
 fclose($socket);
 ```
 
-Найти файл можно и по имени. Условие `l.pdf_sha256 = f.sha256` обязательно:
-если PDF перезаписали по тому же пути, этикетки прошлой версии остаются в базе,
-и без этого условия запрос вернёт вперемешку старые и новые.
+Найти этикетку можно по номеру отправления или по имени файла. Ключевое условие —
+поиск по `pdf_sha256`, а не соединение по `pdf_file_id`:
 
 ```sql
-SELECT l.zpl
+-- По номеру отправления
+SELECT l.id, l.zpl, c.value AS barcode
   FROM zpl_labels l
-  JOIN pdf_files f ON f.id = l.pdf_file_id
- WHERE f.path = '2026/09/wb-12345.pdf'
-   AND l.pdf_sha256 = f.sha256          -- только текущая версия файла
-   AND l.profile_code = 'zebra_203_100x150'
+  LEFT JOIN label_codes c ON c.zpl_label_id = l.id
+ WHERE l.pdf_sha256 = (SELECT sha256 FROM pdf_files WHERE posting_id = ? ORDER BY id DESC LIMIT 1)
+   AND l.profile_code = ?
  ORDER BY l.page_no;
 ```
+
+Искать надо именно по `pdf_sha256`, а не соединением по `pdf_file_id`. Кэш
+контент-адресуемый: два отправления с побайтово одинаковой этикеткой делят одну
+строку в `zpl_labels`, и соединение по идентификатору файла нашло бы её только
+для того, что отрендерился последним.
+
+```sql
+-- По имени файла
+SELECT l.zpl FROM zpl_labels l
+ WHERE l.pdf_sha256 = (SELECT sha256 FROM pdf_files WHERE path = ?)
+   AND l.profile_code = ?
+ ORDER BY l.page_no;
+```
+
+Обращение к `pdf_files.sha256` через подзапрос заодно гарантирует, что вернётся
+только ТЕКУЩАЯ версия файла: если PDF перезаписали по тому же пути, этикетки
+прошлой версии остаются в базе до `bin/status.php --prune`.
 
 Накопившиеся записи прошлых версий убираются командой `php bin/status.php --prune`.
 
@@ -320,6 +343,10 @@ php tests/run.php                                   # тесты (Ghostscript и
 | `render_jobs` | очередь: состояние, попытки, аренда, задержка повтора, текст ошибки |
 | `zpl_labels` | готовый ZPL: по строке на страницу под профиль |
 | `label_codes` | коды, распознанные на этикетке: значение, символика, качество, координаты |
+
+В `pdf_files` есть колонка `posting_id` — номер отправления маркетплейса. Он
+проставляется либо явно (`Api::savePosting()`), либо выводится из имени файла
+по шаблону `scanner.posting_id_pattern`.
 
 Ключ кэша в `zpl_labels` — `(pdf_sha256, profile_fingerprint, page_no)`. Он контент-адресуемый,
 поэтому повторная загрузка того же файла под новым именем не вызывает повторного рендеринга,
