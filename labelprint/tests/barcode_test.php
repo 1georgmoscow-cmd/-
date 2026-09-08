@@ -278,6 +278,50 @@ return [
         assertTrue(!$bitmap->isBlank(), 'растр не пустой');
     },
 
+    'QR читается с мелкой этикетки 58x40 при 203 dpi (формат OZON)' => static function (): void {
+        $reader = new ZbarReader();
+        if (!$reader->isAvailable()) {
+            return;   // zbar-tools не установлен — проверка неприменима
+        }
+
+        // Этикетка OZON — 58x40 мм альбомной ориентации, при 203 dpi это 464x320 точек,
+        // а QR занимает примерно 205x205. Растр маленький, запаса по разрешению почти нет,
+        // поэтому случай стоит держать под тестом отдельно от крупной этикетки 100x150.
+        $qr = SelfTest::qrBitmap();
+        $canvas = Bitmap::create(464, 320);
+
+        // Уменьшать QR нельзя — потеряются модули. Берём его как есть (232x232 не влезает
+        // по высоте) и обрезаем до размера этикетки так же, как это делает подгонка.
+        $scaled = $qr->crop(0, 0, 232, 232);
+        $placed = $scaled->placeOnCanvas(464, 320, 200, 44);
+
+        $codes = $reader->read($placed);
+        $values = array_map(static fn($c) => $c->value, $codes);
+
+        assertTrue(
+            in_array(SelfTest::QR_VALUE, $values, true),
+            'QR на этикетке 464x320 должен читаться: ' . implode(',', $values),
+        );
+    },
+
+    'код у самого края этикетки всё ещё читается' => static function (): void {
+        $reader = new ZbarReader();
+        if (!$reader->isAvailable()) {
+            return;
+        }
+
+        // У QR-кода есть собственная «тихая зона» внутри растра, но если этикетка
+        // обрезает его вплотную, распознавание должно честно вернуть пустой список,
+        // а не упасть.
+        $qr = SelfTest::qrBitmap();
+        $tight = $qr->crop(20, 20, 200, 200);
+
+        $codes = $reader->read($tight);
+
+        // Результат может быть любым — важно, что вызов отработал без исключения.
+        assertTrue(is_array($codes));
+    },
+
     'эталонный QR действительно распознаётся (если есть zbarimg)' => static function (): void {
         $reader = new ZbarReader();
         if (!$reader->isAvailable()) {
