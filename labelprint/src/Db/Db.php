@@ -185,6 +185,36 @@ final class Db
         ] + $this->options;
 
         $this->pdo = new PDO($this->dsn, $this->user, $this->password, $options);
+
+        $this->prepareSession($this->pdo);
+    }
+
+    /**
+     * Настройка сессии сразу после подключения.
+     *
+     * READ COMMITTED обязателен для очереди. SKIP LOCKED пропускает заблокированные
+     * записи, но НЕ пропускает gap-блокировки, а под REPEATABLE READ (умолчание MySQL)
+     * запрос захвата берёт next-key блокировки на просмотренный диапазон индекса.
+     * Эти промежутки блокируют вставку новых заданий, то есть воркеры начинают
+     * тормозить сканер ровно в тот момент, когда очередь наполняется.
+     */
+    private function prepareSession(PDO $pdo): void
+    {
+        $pdo->exec('SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED');
+
+        // Страховка от подвисшего SELECT: PDO::ATTR_TIMEOUT ограничивает только
+        // установку соединения, а mysqlnd.net_read_timeout по умолчанию — сутки.
+        // Переменная есть в MySQL 5.7.8+ и отсутствует в MariaDB, поэтому молча пропускаем.
+        try {
+            $pdo->exec('SET SESSION max_execution_time = 30000');
+        } catch (PDOException) {
+            // MariaDB: аналог называется max_statement_time и задаётся в секундах.
+            try {
+                $pdo->exec('SET SESSION max_statement_time = 30');
+            } catch (PDOException) {
+                // Ни того, ни другого — работаем без ограничения.
+            }
+        }
     }
 
     private function isConnectionLost(PDOException $e): bool

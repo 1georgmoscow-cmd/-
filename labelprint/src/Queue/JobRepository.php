@@ -22,6 +22,11 @@ final class JobRepository
     public const STATE_RUNNING = 'running';
     public const STATE_DONE = 'done';
     public const STATE_FAILED = 'failed';
+    /**
+     * Тупик: попытки исчерпаны. Отдельно от failed, потому что failed можно
+     * массово вернуть в очередь, а dead требует вмешательства человека.
+     */
+    public const STATE_DEAD = 'dead';
 
     private const SELECT_JOB = <<<'SQL'
         SELECT j.id, j.pdf_file_id, j.profile_code, j.profile_fingerprint,
@@ -112,6 +117,7 @@ final class JobRepository
                   FROM render_jobs
                  WHERE state = ?
                    AND available_at <= NOW()
+                   AND attempts < max_attempts
                  ORDER BY priority DESC, id ASC
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED
@@ -149,7 +155,7 @@ final class JobRepository
                 'UPDATE render_jobs
                     SET state = ?, owner = ?, claim_token = ?, attempts = attempts + 1,
                         lease_expires_at = DATE_ADD(NOW(), INTERVAL %d SECOND)
-                  WHERE state = ? AND available_at <= NOW()
+                  WHERE state = ? AND available_at <= NOW() AND attempts < max_attempts
                   ORDER BY priority DESC, id ASC
                   LIMIT 1',
                 $lease,
@@ -203,8 +209,7 @@ final class JobRepository
     public function fail(Job $job, string $error, int $backoffBaseSeconds = 5): bool
     {
         $retry = !$job->isLastAttempt();
-        // Задержка растёт как base^attempts, но не больше часа.
-        $delay = $retry ? (int) min(3600, $backoffBaseSeconds ** max(1, $job->attempts)) : 0;
+        $delay = $retry ? self::backoffSeconds($backoffBaseSeconds, $job->attempts) : 0;
         $error = mb_substr($error, 0, 4000);
 
         if ($retry) {
@@ -232,21 +237,62 @@ final class JobRepository
     }
 
     /**
-     * Возвращает в очередь задания умерших воркеров (аренда истекла).
+     * Экспоненциальная задержка перед повтором: base, 2*base, 4*base, ... но не больше часа.
      *
-     * @return int сколько заданий освобождено
+     * Разброс в 20 процентов обязателен. Без него все задания, упавшие во время
+     * недоступности базы или принтера, повторяются строго одновременно и кладут
+     * систему повторно ровно в тот момент, когда она поднялась.
      */
-    public function releaseExpired(): int
+    public static function backoffSeconds(int $base, int $attempt, ?float $jitter = null): int
     {
-        $stmt = $this->db->run(
-            'UPDATE render_jobs
-                SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL,
-                    error_message = COALESCE(error_message, ?)
-              WHERE state = ? AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW()',
-            [self::STATE_PENDING, 'аренда истекла, задание возвращено в очередь', self::STATE_RUNNING],
-        );
+        $base = max(1, $base);
+        $delay = min(3600, $base * (2 ** max(0, $attempt - 1)));
+        $jitter ??= random_int(-20, 20) / 100;
 
-        return $stmt->rowCount();
+        return max(1, (int) round($delay * (1 + $jitter)));
+    }
+
+    /**
+     * Разбирает задания умерших воркеров (аренда истекла).
+     *
+     * Различаются два исхода. Если попытки ещё есть, задание возвращается в очередь.
+     * Если исчерпаны — уходит в dead. Без второй ветки получается «отравленное»
+     * задание: PDF, на котором воркер не бросает исключение, а ПАДАЕТ (нехватка памяти,
+     * SIGKILL от OOM-killer, сегфолт в библиотеке), никогда не доходит до fail(),
+     * его аренда истекает, оно снова становится pending и убивает следующий воркер.
+     * И так по кругу, вечно.
+     *
+     * @return array{released:int,dead:int}
+     */
+    public function releaseExpired(): array
+    {
+        $expired = 'state = ? AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW()';
+
+        // Сначала тупиковые: попытки исчерпаны, воркер до fail() не дожил.
+        $dead = $this->db->run(
+            "UPDATE render_jobs
+                SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL,
+                    error_message = CONCAT(?, COALESCE(error_message, '—'))
+              WHERE {$expired} AND attempts >= max_attempts",
+            [
+                self::STATE_DEAD,
+                'Попытки исчерпаны, а воркер каждый раз завершался аварийно, не оставив '
+                . 'сообщения об ошибке (нехватка памяти, SIGKILL, сбой в библиотеке). '
+                . 'Задание снято с очереди. Последнее известное сообщение: ',
+                self::STATE_RUNNING,
+            ],
+        )->rowCount();
+
+        $released = $this->db->run(
+            "UPDATE render_jobs
+                SET state = ?, owner = NULL, claim_token = NULL, lease_expires_at = NULL,
+                    error_message = COALESCE(error_message, ?),
+                    available_at = DATE_ADD(NOW(), INTERVAL 5 SECOND)
+              WHERE {$expired}",
+            [self::STATE_PENDING, 'аренда истекла, задание возвращено в очередь', self::STATE_RUNNING],
+        )->rowCount();
+
+        return ['released' => $released, 'dead' => $dead];
     }
 
     /** Снимает задания, «зависшие» за конкретным воркером (аккуратная остановка/падение). */
@@ -262,13 +308,18 @@ final class JobRepository
         return $stmt->rowCount();
     }
 
-    /** Повторно ставит в очередь задания, упавшие насовсем. */
-    public function retryFailed(?string $profileCode = null): int
+    /**
+     * Повторно ставит в очередь упавшие задания. Тупиковые (dead) включаются
+     * только явным флагом: их уронил не сбой, а сам файл.
+     */
+    public function retryFailed(?string $profileCode = null, bool $includeDead = false): int
     {
         $sql = 'UPDATE render_jobs
                    SET state = ?, attempts = 0, available_at = NOW(), error_message = NULL
-                 WHERE state = ?';
-        $params = [self::STATE_PENDING, self::STATE_FAILED];
+                 WHERE state ' . ($includeDead ? 'IN (?, ?)' : '= ?');
+        $params = $includeDead
+            ? [self::STATE_PENDING, self::STATE_FAILED, self::STATE_DEAD]
+            : [self::STATE_PENDING, self::STATE_FAILED];
 
         if ($profileCode !== null) {
             $sql .= ' AND profile_code = ?';
@@ -281,7 +332,13 @@ final class JobRepository
     /** @return array<string,int> состояние => количество */
     public function counts(): array
     {
-        $out = [self::STATE_PENDING => 0, self::STATE_RUNNING => 0, self::STATE_DONE => 0, self::STATE_FAILED => 0];
+        $out = [
+            self::STATE_PENDING => 0,
+            self::STATE_RUNNING => 0,
+            self::STATE_DONE => 0,
+            self::STATE_FAILED => 0,
+            self::STATE_DEAD => 0,
+        ];
         foreach ($this->db->fetchAll('SELECT state, COUNT(*) AS n FROM render_jobs GROUP BY state') as $row) {
             $out[(string) $row['state']] = (int) $row['n'];
         }
@@ -293,13 +350,13 @@ final class JobRepository
     public function recentFailures(int $limit = 20): array
     {
         return $this->db->fetchAll(
-            'SELECT j.id, f.path, j.profile_code, j.attempts, j.error_message, j.updated_at
+            'SELECT j.id, f.path, j.profile_code, j.state, j.attempts, j.error_message, j.updated_at
                FROM render_jobs j
                JOIN pdf_files f ON f.id = j.pdf_file_id
-              WHERE j.state = ?
+              WHERE j.state IN (?, ?)
               ORDER BY j.updated_at DESC
               LIMIT ' . max(1, $limit),
-            [self::STATE_FAILED],
+            [self::STATE_FAILED, self::STATE_DEAD],
         );
     }
 }

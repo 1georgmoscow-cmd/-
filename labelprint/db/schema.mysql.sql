@@ -17,11 +17,16 @@ USE `labelprint`;
 CREATE TABLE IF NOT EXISTS `pdf_files` (
     `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     -- Путь относительно pdf_dir, например '2026/09/wb-12345.pdf'.
-    `path`          VARCHAR(1024)   NOT NULL,
-    -- SHA-1 от пути: индексировать VARCHAR(1024) в utf8mb4 нельзя (лимит 3072 байта).
-    `path_sha1`     CHAR(40)        NOT NULL,
+    -- Именно VARBINARY, а не VARCHAR: имена файлов в Linux — это байты без гарантии
+    -- кодировки. PDF, пришедший по FTP с именем в CP1251, невалиден как UTF-8, и
+    -- VARCHAR(1024) utf8mb4 отверг бы его с ошибкой 1366 — файл никогда бы не попал
+    -- в очередь. VARBINARY хранит байты как есть.
+    `path`          VARBINARY(1024) NOT NULL,
+    -- SHA-1 от пути: короткий ключ уникальности вместо индекса на 1024 байта.
+    `path_sha1`     CHAR(40)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     -- SHA-256 содержимого: именно он делает кэш контент-адресуемым.
-    `sha256`        CHAR(64)        NOT NULL,
+    -- ascii_bin вместо utf8mb4: 64 байта на значение вместо 256, вчетверо меньше индекс.
+    `sha256`        CHAR(64)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     `size_bytes`    BIGINT UNSIGNED NOT NULL,
     `mtime`         INT UNSIGNED    NOT NULL,
     `page_count`    SMALLINT UNSIGNED DEFAULT NULL,
@@ -39,10 +44,12 @@ CREATE TABLE IF NOT EXISTS `pdf_files` (
 CREATE TABLE IF NOT EXISTS `render_jobs` (
     `id`                   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `pdf_file_id`          BIGINT UNSIGNED NOT NULL,
-    `profile_code`         VARCHAR(64)     NOT NULL,
+    `profile_code`         VARCHAR(64)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     -- Отпечаток параметров профиля: если профиль изменили, старый ZPL больше не подходит.
-    `profile_fingerprint`  CHAR(16)        NOT NULL,
-    `state`                ENUM('pending','running','done','failed') NOT NULL DEFAULT 'pending',
+    `profile_fingerprint`  CHAR(16)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- dead — попытки исчерпаны, задание больше не берётся в работу.
+    -- Отдельно от failed: failed можно вернуть в очередь пачкой, dead требует разбора.
+    `state`                ENUM('pending','running','done','failed','dead') NOT NULL DEFAULT 'pending',
     -- Больше значение — раньше берём в работу.
     `priority`             TINYINT         NOT NULL DEFAULT 0,
     `attempts`             TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -51,10 +58,10 @@ CREATE TABLE IF NOT EXISTS `render_jobs` (
     `available_at`         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- Аренда: если воркер умер, после истечения задание вернётся в очередь.
     `lease_expires_at`     DATETIME        DEFAULT NULL,
-    `owner`                VARCHAR(64)     DEFAULT NULL,
+    `owner`                VARCHAR(64)     CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
     -- Уникальный токен захвата: позволяет надёжно перечитать своё задание
     -- в запасном варианте без SKIP LOCKED.
-    `claim_token`          CHAR(32)        DEFAULT NULL,
+    `claim_token`          CHAR(32)        CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
     `error_message`        TEXT            DEFAULT NULL,
     `duration_ms`          INT UNSIGNED    DEFAULT NULL,
     `created_at`           DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -65,7 +72,9 @@ CREATE TABLE IF NOT EXISTS `render_jobs` (
     -- Рабочий индекс захвата: сначала фильтр по состоянию, затем по времени доступности.
     KEY `idx_job_claim` (`state`, `available_at`, `priority`, `id`),
     KEY `idx_job_lease` (`state`, `lease_expires_at`),
-    KEY `idx_job_token` (`claim_token`),
+    -- Уникальный: два задания не могут нести один токен захвата, и это гарантирует,
+    -- что перечитывание своего задания в запасном варианте не найдёт чужое.
+    UNIQUE KEY `uk_job_token` (`claim_token`),
     CONSTRAINT `fk_job_pdf` FOREIGN KEY (`pdf_file_id`) REFERENCES `pdf_files` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -77,9 +86,9 @@ CREATE TABLE IF NOT EXISTS `zpl_labels` (
     `pdf_file_id`         BIGINT UNSIGNED NOT NULL,
     -- Дублируем хэш содержимого: делает кэш контент-адресуемым и переживает
     -- переименование или повторную загрузку того же файла под другим именем.
-    `pdf_sha256`          CHAR(64)        NOT NULL,
-    `profile_code`        VARCHAR(64)     NOT NULL,
-    `profile_fingerprint` CHAR(16)        NOT NULL,
+    `pdf_sha256`          CHAR(64)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    `profile_code`        VARCHAR(64)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    `profile_fingerprint` CHAR(16)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     `page_no`             SMALLINT UNSIGNED NOT NULL DEFAULT 1,
     `dpi`                 SMALLINT UNSIGNED NOT NULL,
     `width_dots`          SMALLINT UNSIGNED NOT NULL,
@@ -87,10 +96,13 @@ CREATE TABLE IF NOT EXISTS `zpl_labels` (
     `compression`         ENUM('hex','acs','z64') NOT NULL,
     -- Готовые к отправке байты ^XA...^XZ. BLOB, а не TEXT: ZPL — это ASCII-поток,
     -- ему не нужны ни кодировка, ни collation, и BLOB гарантирует побайтовую сохранность.
-    -- MEDIUMBLOB = до 16 МБ; этикетка 100x150 мм при 203 dpi занимает 15-60 КБ со сжатием ACS.
+    -- MEDIUMBLOB = до 16 МБ. Замеры: обычная этикетка 100x150 при 203 dpi — 15 КБ (ACS)
+    -- или 5 КБ (Z64); худший реальный случай, полностраничный растр с полутоном, — 227 КБ;
+    -- теоретический потолок ACS равен удвоенному размеру растра, то есть 2,2 МБ даже для
+    -- ошибочно загруженного A4 при 300 dpi. Запас семикратный, LONGBLOB не нужен.
     `zpl`                 MEDIUMBLOB      NOT NULL,
     `zpl_bytes`           INT UNSIGNED    NOT NULL,
-    `zpl_sha256`          CHAR(64)        NOT NULL,
+    `zpl_sha256`          CHAR(64)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     -- Доля чёрного: близко к 0 — пустая этикетка, близко к 1 — вероятная инверсия.
     `ink_coverage`        FLOAT           DEFAULT NULL,
     `render_ms`           INT UNSIGNED    DEFAULT NULL,
@@ -108,11 +120,18 @@ CREATE TABLE IF NOT EXISTS `zpl_labels` (
 -- ---------------------------------------------------------------------------
 -- В /etc/mysql/mysql.conf.d/mysqld.cnf:
 --   [mysqld]
---   max_allowed_packet = 64M      # BLOB с ZPL уходит одним пакетом
---   innodb_log_file_size = 256M   # запись должна помещаться в лог с запасом
---   wait_timeout = 28800          # воркер долгоживущий; Db переподключается сам
+--   max_allowed_packet = 64M          # в MySQL 8 это уже значение по умолчанию,
+--                                     # но Debian/Ubuntu кладут свои файлы конфигурации,
+--                                     # поэтому лучше задать явно
+--   innodb_redo_log_capacity = 512M   # в MySQL 8.0.30+ пришло на смену innodb_log_file_size;
+--                                     # меняется на лету через SET GLOBAL
+--   wait_timeout = 28800              # воркер долгоживущий; Db переподключается сам
 --
 -- Проверить:  SHOW VARIABLES LIKE 'max_allowed_packet';
+--
+-- Если реплики нет, двоичный лог удваивает объём записи: при binlog_format=ROW
+-- каждый ZPL пишется и в таблицу, и в binlog, который по умолчанию хранится 30 дней.
+-- Отключается через skip-log-bin, либо сокращается binlog_expire_logs_seconds.
 --
 -- Пользователь для сервиса:
 --   CREATE USER 'labelprint'@'localhost' IDENTIFIED BY 'смените-пароль';

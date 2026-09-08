@@ -15,7 +15,7 @@ use LabelPrint\App;
 use LabelPrint\Support\Args;
 
 try {
-    $options = Args::parse($argv, ['failures', 'retry-failed'], ['config']);
+    $options = Args::parse($argv, ['failures', 'retry-failed', 'retry-dead'], ['config']);
 } catch (RuntimeException $e) {
     fwrite(STDERR, $e->getMessage() . "\n");
     exit(1);
@@ -26,8 +26,8 @@ $app = App::boot($options->value('config'));
 $jobs = $app->jobs();
 $labels = $app->labels();
 
-if ($options->has('retry-failed')) {
-    printf("Возвращено в очередь: %d\n\n", $jobs->retryFailed());
+if ($options->has('retry-failed') || $options->has('retry-dead')) {
+    printf("Возвращено в очередь: %d\n\n", $jobs->retryFailed(null, $options->has('retry-dead')));
 }
 
 $counts = $jobs->counts();
@@ -38,6 +38,7 @@ printf("  ожидают:     %d\n", $counts['pending']);
 printf("  в работе:    %d\n", $counts['running']);
 printf("  готово:      %d\n", $counts['done']);
 printf("  ошибки:      %d\n", $counts['failed']);
+printf("  тупиковые:   %d%s\n", $counts['dead'], $counts['dead'] > 0 ? '  <- требуют разбора' : '');
 
 echo "\nХранилище ZPL\n";
 printf("  этикеток:    %s\n", number_format($stats['labels']));
@@ -53,10 +54,11 @@ if ($options->has('failures')) {
         echo "\nПоследние ошибки\n";
         foreach ($failures as $row) {
             printf(
-                "  #%d %s [%s] попыток %d\n      %s\n",
+                "  #%d %s [%s] %s, попыток %d\n      %s\n",
                 $row['id'],
                 $row['path'],
                 $row['profile_code'],
+                $row['state'] === 'dead' ? 'ТУПИК' : 'ошибка',
                 $row['attempts'],
                 trim((string) $row['error_message']),
             );

@@ -63,9 +63,18 @@ final class Worker
 
             // Раз в 30 секунд возвращаем в очередь задания умерших воркеров.
             if ($now >= $nextMaintenance) {
-                $released = $this->jobs->releaseExpired();
-                if ($released > 0) {
-                    $this->log->warning('возвращены задания с истёкшей арендой', ['count' => $released]);
+                $recovered = $this->jobs->releaseExpired();
+                if ($recovered['released'] > 0) {
+                    $this->log->warning('возвращены задания с истёкшей арендой', [
+                        'count' => $recovered['released'],
+                    ]);
+                }
+                if ($recovered['dead'] > 0) {
+                    // Такое задание роняет воркер, не доходя до обработки ошибки.
+                    // Оно больше не берётся в работу и требует разбора руками.
+                    $this->log->error('задания признаны тупиковыми: воркер падал на них до исчерпания попыток', [
+                        'count' => $recovered['dead'],
+                    ]);
                 }
                 $nextMaintenance = $now + 30;
             }
