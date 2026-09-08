@@ -25,6 +25,24 @@ use LabelPrint\Pdf\Bitmap;
  */
 final class ZplEncoder
 {
+    /**
+     * Документированный предел параметров b, c и d команды ^GF.
+     *
+     * Мануал даёт диапазон 1..99999 и добавляет: «Out-of-range values are set to
+     * the nearest limit». Прочитанное буквально, это означало бы, что этикетка
+     * 100x150 мм при 203 dpi (c = 120 000) обрежется примерно на 80 процентов.
+     * На практике прошивки принимают большие значения — их же выдаёт и сам
+     * ZebraDesigner, — но расхождение спецификации и поведения стоит знать:
+     * если этикетка печатается обрезанной сверху, причина может быть здесь.
+     */
+    public const DOCUMENTED_MAX_FIELD = 99999;
+
+    /** Превышает ли растр документированный предел параметров ^GF. */
+    public static function exceedsDocumentedLimit(int $bytesPerRow, int $height): bool
+    {
+        return $bytesPerRow * $height > self::DOCUMENTED_MAX_FIELD;
+    }
+
     /** Собирает команду ^GFA целиком. */
     public static function graphicField(Bitmap $bitmap, string $compression = PrinterProfile::COMPRESSION_ACS): string
     {

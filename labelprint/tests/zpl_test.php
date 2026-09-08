@@ -204,6 +204,38 @@ return [
         assertContains('^GFA,', $zpl);
     },
 
+    'документированный предел параметров ^GF' => static function (): void {
+        // Мануал даёт для b, c и d диапазон 1..99999. Этикетка 58x40 мм укладывается,
+        // а 100x150 мм — нет. Прошивки большие значения принимают, но знать об этом надо.
+        $small = PrinterProfile::fromArray('s', ['dpi' => 203, 'width_mm' => 58, 'height_mm' => 40]);
+        $large = PrinterProfile::fromArray('l', ['dpi' => 203, 'width_mm' => 100, 'height_mm' => 150]);
+
+        $bytesPerRow = static fn(PrinterProfile $p): int => intdiv($p->widthDots() + 7, 8);
+
+        assertTrue(
+            !ZplEncoder::exceedsDocumentedLimit($bytesPerRow($small), $small->heightDots()),
+            '58x40 мм при 203 dpi укладывается в 99999',
+        );
+        assertTrue(
+            ZplEncoder::exceedsDocumentedLimit($bytesPerRow($large), $large->heightDots()),
+            '100x150 мм при 203 dpi выходит за 99999',
+        );
+    },
+
+    'параметры ^GF выводятся полностью, даже когда велики' => static function (): void {
+        // Пропущенный параметр не заменяется нулём — команда молча игнорируется целиком.
+        $bitmap = Bitmap::create(800, 1199);
+        $field = ZplEncoder::graphicField($bitmap, PrinterProfile::COMPRESSION_ACS);
+
+        assertTrue(
+            preg_match('/^\^GFA,(\d+),(\d+),(\d+),/', $field, $m) === 1,
+            'все четыре параметра на месте',
+        );
+        assertSame('119900', $m[1], 'b');
+        assertSame('119900', $m[2], 'c = b');
+        assertSame('100', $m[3], 'd = байт в строке');
+    },
+
     'CRC16 сходится с контрольным вектором XMODEM' => static function (): void {
         assertSame(0x31C3, Z64Encoder::crc16('123456789'), 'эталонное значение CRC-16/XMODEM');
     },

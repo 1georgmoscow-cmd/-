@@ -102,6 +102,27 @@ check('профиль по умолчанию', static function () use ($app): a
     return ['ok', $code];
 });
 
+check('размер полей ^GF в профилях', static function () use ($app): array {
+    $over = [];
+    foreach ($app->profiles()->all() as $code => $profile) {
+        if ($profile->fit !== 'fit') {
+            continue;   // в режиме native размер известен только во время рендеринга
+        }
+        $bytesPerRow = intdiv($profile->widthDots() + 7, 8);
+        if (\LabelPrint\Render\ZplEncoder::exceedsDocumentedLimit($bytesPerRow, $profile->heightDots())) {
+            $over[] = sprintf('%s (%s)', $code, number_format($bytesPerRow * $profile->heightDots(), 0, '.', ' '));
+        }
+    }
+
+    if ($over === []) {
+        return ['ok', 'все в пределах 99 999'];
+    }
+
+    return ['warn', 'выше документированного предела 99 999: ' . implode(', ', $over)
+        . '. Прошивки Zebra такие значения принимают (их выдаёт и ZebraDesigner), '
+        . 'но если этикетка печатается обрезанной — причина может быть здесь'];
+});
+
 check('каталог с PDF', static function () use ($app): array {
     $dir = $app->config->string('pdf_dir');
     if (!is_dir($dir)) {
