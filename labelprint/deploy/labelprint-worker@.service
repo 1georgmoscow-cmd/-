@@ -1,0 +1,52 @@
+# Воркер рендеринга PDF -> ZPL.
+#
+# Шаблонный юнит: запускается несколько экземпляров, номер подставляется через %i.
+# Ghostscript упирается в процессор, поэтому воркеров имеет смысл столько же,
+# сколько ядер (можно на один меньше, чтобы оставить запас веб-серверу).
+#
+#   sudo cp deploy/labelprint-worker@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now labelprint-worker@{1,2,3,4}
+#   journalctl -u 'labelprint-worker@*' -f
+
+[Unit]
+Description=labelprint: рендеринг PDF в ZPL (воркер %i)
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/labelprint
+ExecStart=/usr/bin/php /opt/labelprint/bin/worker.php
+
+# Воркер сам завершается после worker.max_jobs заданий или max_lifetime_sec секунд —
+# это штатный выход с кодом 0, и systemd обязан поднять процесс снова.
+Restart=always
+RestartSec=2
+
+# Дать текущему заданию дорисоваться: воркер ловит SIGTERM и выходит после него.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Пароль к базе лучше держать здесь, а не в config.php под гитом.
+# EnvironmentFile=-/etc/labelprint/env
+# Формат файла: LABELPRINT_DB_PASSWORD=...
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=labelprint-worker-%i
+
+# Минимальные привилегии: воркеру нужно только читать PDF и ходить в MySQL.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/labelprint/storage
+ReadOnlyPaths=/upload/pdf
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

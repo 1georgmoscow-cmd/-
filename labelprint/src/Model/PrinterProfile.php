@@ -30,6 +30,11 @@ final class PrinterProfile
         public readonly string $fit = self::FIT_FIT,
         /** Поворот растра, градусы по часовой: 0, 90, 180 или 270. */
         public readonly int $rotate = 0,
+        /**
+         * Доворачивать на 90 градусов, если ориентация страницы PDF не совпадает
+         * с ориентацией этикетки. Типовой случай: этикетка приходит «лёжа».
+         */
+        public readonly bool $autoRotate = true,
         /** Порог бинаризации 1..254 при рендеринге через полутон. */
         public readonly int $threshold = 128,
         /** Инвертировать изображение (белое на чёрном). */
@@ -81,6 +86,7 @@ final class PrinterProfile
             heightMm: (float) ($data['height_mm'] ?? 150.0),
             fit: (string) ($data['fit'] ?? self::FIT_FIT),
             rotate: (int) ($data['rotate'] ?? 0),
+            autoRotate: (bool) ($data['auto_rotate'] ?? true),
             threshold: (int) ($data['threshold'] ?? 128),
             invert: (bool) ($data['invert'] ?? false),
             compression: (string) ($data['compression'] ?? self::COMPRESSION_ACS),
@@ -91,6 +97,12 @@ final class PrinterProfile
                 : 'gap',
             quantity: (int) ($data['quantity'] ?? 1),
         );
+    }
+
+    /** Этикетка шире, чем выше. */
+    public function isLandscape(): bool
+    {
+        return $this->widthMm > $this->heightMm;
     }
 
     /** Ширина этикетки в точках принтера. */
@@ -117,6 +129,7 @@ final class PrinterProfile
             $this->heightMm,
             $this->fit,
             $this->rotate,
+            $this->autoRotate,
             $this->threshold,
             $this->invert,
             $this->compression,

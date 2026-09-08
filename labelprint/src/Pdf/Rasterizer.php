@@ -40,9 +40,11 @@ final class Rasterizer
     /**
      * Рендерит все страницы PDF под профиль.
      *
+     * @param bool $swapGeometry рендерить холст повёрнутым (высота x ширина);
+     *                            нужно, когда растр потом будет повёрнут на 90 или 270
      * @return list<Bitmap> по одному растру на страницу, в порядке страниц
      */
-    public function rasterize(string $pdfPath, PrinterProfile $profile): array
+    public function rasterize(string $pdfPath, PrinterProfile $profile, bool $swapGeometry = false): array
     {
         if (!is_file($pdfPath) || !is_readable($pdfPath)) {
             throw new \RuntimeException("PDF недоступен для чтения: {$pdfPath}");
@@ -57,7 +59,7 @@ final class Rasterizer
             }
         }
 
-        $command = $this->buildCommand($pdfPath, $profile);
+        $command = $this->buildCommand($pdfPath, $profile, $swapGeometry);
         $started = hrtime(true);
         [$stdout, $stderr, $exitCode] = $this->run($command);
         $elapsedMs = (int) ((hrtime(true) - $started) / 1_000_000);
@@ -169,7 +171,7 @@ final class Rasterizer
     }
 
     /** @return list<string> */
-    private function buildCommand(string $pdfPath, PrinterProfile $profile): array
+    private function buildCommand(string $pdfPath, PrinterProfile $profile, bool $swapGeometry): array
     {
         $args = [
             $this->ghostscript,
@@ -191,7 +193,9 @@ final class Rasterizer
             // Жёстко задаём размер холста в точках и вписываем страницу в него.
             // -dFIXEDMEDIA не даёт PDF переопределить размер своим MediaBox,
             // -dPDFFitPage масштабирует страницу с сохранением пропорций.
-            $args[] = '-g' . $profile->widthDots() . 'x' . $profile->heightDots();
+            $width = $swapGeometry ? $profile->heightDots() : $profile->widthDots();
+            $height = $swapGeometry ? $profile->widthDots() : $profile->heightDots();
+            $args[] = '-g' . $width . 'x' . $height;
             $args[] = '-dFIXEDMEDIA';
             $args[] = '-dPDFFitPage';
         }

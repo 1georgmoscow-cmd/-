@@ -1,0 +1,41 @@
+# Наблюдение за /upload/pdf: новые файлы попадают в очередь рендеринга.
+#
+# Экземпляр должен быть ровно один — иначе несколько сканеров будут дублировать работу
+# (дубликаты отсекаются уникальным ключом в базе, но это лишняя нагрузка).
+#
+#   sudo cp deploy/labelprint-scanner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now labelprint-scanner
+
+[Unit]
+Description=labelprint: наблюдение за каталогом с PDF
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/labelprint
+ExecStart=/usr/bin/php /opt/labelprint/bin/scan.php --watch
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# EnvironmentFile=-/etc/labelprint/env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=labelprint-scanner
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/labelprint/storage
+ReadOnlyPaths=/upload/pdf
+
+[Install]
+WantedBy=multi-user.target
