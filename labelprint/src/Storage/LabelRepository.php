@@ -1,0 +1,147 @@
+<?php
+declare(strict_types=1);
+
+namespace LabelPrint\Storage;
+
+use LabelPrint\Db\Db;
+use LabelPrint\Model\PrinterProfile;
+
+/**
+ * Хранилище готовых ZPL.
+ *
+ * Кэш контент-адресуемый: ключ — SHA-256 содержимого PDF плюс отпечаток профиля
+ * плюс номер страницы. Поэтому повторно загруженный под другим именем тот же файл
+ * не рендерится заново, а изменение параметров профиля автоматически даёт новую запись.
+ */
+final class LabelRepository
+{
+    public function __construct(private readonly Db $db)
+    {
+    }
+
+    /**
+     * Сохраняет отрендеренную страницу. Повторный рендер той же страницы перезаписывает запись.
+     *
+     * @return int id строки в zpl_labels
+     */
+    public function store(
+        int $pdfFileId,
+        string $pdfSha256,
+        PrinterProfile $profile,
+        int $pageNo,
+        string $zpl,
+        int $widthDots,
+        int $heightDots,
+        ?float $inkCoverage = null,
+        ?int $renderMs = null,
+    ): int {
+        $this->db->run(
+            'INSERT INTO zpl_labels
+                (pdf_file_id, pdf_sha256, profile_code, profile_fingerprint, page_no,
+                 dpi, width_dots, height_dots, compression, zpl, zpl_bytes, zpl_sha256,
+                 ink_coverage, render_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                pdf_file_id = VALUES(pdf_file_id),
+                profile_code = VALUES(profile_code),
+                dpi = VALUES(dpi),
+                width_dots = VALUES(width_dots),
+                height_dots = VALUES(height_dots),
+                compression = VALUES(compression),
+                zpl = VALUES(zpl),
+                zpl_bytes = VALUES(zpl_bytes),
+                zpl_sha256 = VALUES(zpl_sha256),
+                ink_coverage = VALUES(ink_coverage),
+                render_ms = VALUES(render_ms),
+                created_at = CURRENT_TIMESTAMP,
+                id = LAST_INSERT_ID(zpl_labels.id)',
+            [
+                $pdfFileId,
+                $pdfSha256,
+                $profile->code,
+                $profile->fingerprint(),
+                $pageNo,
+                $profile->dpi,
+                $widthDots,
+                $heightDots,
+                $profile->compression,
+                $zpl,
+                strlen($zpl),
+                hash('sha256', $zpl),
+                $inkCoverage,
+                $renderMs,
+            ],
+        );
+
+        return $this->db->lastInsertId();
+    }
+
+    /**
+     * Готовый ZPL из кэша.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function find(string $pdfSha256, PrinterProfile $profile, int $pageNo = 1): ?array
+    {
+        return $this->db->fetchOne(
+            'SELECT * FROM zpl_labels
+              WHERE pdf_sha256 = ? AND profile_fingerprint = ? AND page_no = ?',
+            [$pdfSha256, $profile->fingerprint(), $pageNo],
+        );
+    }
+
+    /**
+     * Все страницы файла под профиль, по порядку — то, что нужно отправить на принтер.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function findPages(string $pdfSha256, PrinterProfile $profile): array
+    {
+        return $this->db->fetchAll(
+            'SELECT * FROM zpl_labels
+              WHERE pdf_sha256 = ? AND profile_fingerprint = ?
+              ORDER BY page_no ASC',
+            [$pdfSha256, $profile->fingerprint()],
+        );
+    }
+
+    /** Сколько страниц уже отрендерено для файла под профиль. */
+    public function pageCount(string $pdfSha256, PrinterProfile $profile): int
+    {
+        $row = $this->db->fetchOne(
+            'SELECT COUNT(*) AS n FROM zpl_labels WHERE pdf_sha256 = ? AND profile_fingerprint = ?',
+            [$pdfSha256, $profile->fingerprint()],
+        );
+
+        return (int) ($row['n'] ?? 0);
+    }
+
+    /** Удаляет лишние страницы, если PDF стал короче, чем был при прошлом рендере. */
+    public function deletePagesAbove(string $pdfSha256, PrinterProfile $profile, int $lastPage): int
+    {
+        return $this->db->run(
+            'DELETE FROM zpl_labels
+              WHERE pdf_sha256 = ? AND profile_fingerprint = ? AND page_no > ?',
+            [$pdfSha256, $profile->fingerprint(), $lastPage],
+        )->rowCount();
+    }
+
+    /** @return array{labels:int,bytes:int,avg_bytes:int,avg_render_ms:int} */
+    public function stats(): array
+    {
+        $row = $this->db->fetchOne(
+            'SELECT COUNT(*) AS labels,
+                    COALESCE(SUM(zpl_bytes), 0) AS bytes,
+                    COALESCE(AVG(zpl_bytes), 0) AS avg_bytes,
+                    COALESCE(AVG(render_ms), 0) AS avg_render_ms
+               FROM zpl_labels',
+        ) ?? [];
+
+        return [
+            'labels' => (int) ($row['labels'] ?? 0),
+            'bytes' => (int) ($row['bytes'] ?? 0),
+            'avg_bytes' => (int) round((float) ($row['avg_bytes'] ?? 0)),
+            'avg_render_ms' => (int) round((float) ($row['avg_render_ms'] ?? 0)),
+        ];
+    }
+}
