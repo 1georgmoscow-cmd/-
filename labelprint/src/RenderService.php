@@ -3,12 +3,14 @@ declare(strict_types=1);
 
 namespace LabelPrint;
 
+use LabelPrint\Barcode\CodeReader;
 use LabelPrint\Model\Job;
 use LabelPrint\Model\PrinterProfile;
 use LabelPrint\Pdf\Bitmap;
 use LabelPrint\Pdf\PdfInfo;
 use LabelPrint\Pdf\RasterizerFactory;
 use LabelPrint\Render\ZplLabelBuilder;
+use LabelPrint\Storage\CodeRepository;
 use LabelPrint\Storage\LabelRepository;
 use LabelPrint\Storage\PdfFileRepository;
 use LabelPrint\Support\Log;
@@ -30,6 +32,10 @@ final class RenderService
         private readonly PdfFileRepository $files,
         private readonly Log $log,
         private readonly ?string $pdfinfoBinary = null,
+        private readonly ?CodeReader $codes = null,
+        private readonly ?CodeRepository $codeStore = null,
+        /** Предупреждать, если на этикетке не нашлось ни одного кода. */
+        private readonly bool $warnWhenNoCodes = true,
     ) {
     }
 
@@ -166,7 +172,7 @@ final class RenderService
 
             $this->warnIfSuspicious($relativePath, $pageNo, $coverage);
 
-            $this->labels->store(
+            $labelId = $this->labels->store(
                 pdfFileId: $pdfFileId,
                 pdfSha256: $sha256,
                 profile: $profile,
@@ -177,6 +183,8 @@ final class RenderService
                 inkCoverage: $coverage,
                 renderMs: (int) ((hrtime(true) - $started) / 1_000_000),
             );
+
+            $this->storeCodes($labelId, $sha256, $profile, $pageNo, $bitmap, $relativePath);
 
             $totalBytes += strlen($zpl);
 
@@ -238,6 +246,64 @@ final class RenderService
             $canvasWidth * 72 / $info->widthPt,
             $canvasHeight * 72 / $info->heightPt,
         );
+    }
+
+    /**
+     * Распознаёт коды на готовом растре и сохраняет их рядом с этикеткой.
+     *
+     * Читается ровно тот растр, который уедет на принтер, — в этом весь смысл.
+     * Код, не читающийся отсюда, не прочтёт и сканер на складе, а узнать об этом
+     * лучше сейчас, чем когда этикетка уже на коробке.
+     *
+     * Ошибка распознавания не отменяет печать: этикетка нужнее, чем проверка.
+     */
+    private function storeCodes(
+        int $labelId,
+        string $sha256,
+        PrinterProfile $profile,
+        int $pageNo,
+        Bitmap $bitmap,
+        string $relativePath,
+    ): void {
+        if ($this->codes === null || $this->codeStore === null || !$this->codes->isEnabled()) {
+            return;
+        }
+
+        $started = hrtime(true);
+
+        try {
+            $found = $this->codes->read($bitmap, "{$relativePath}#{$pageNo}");
+            $this->codeStore->replaceForLabel($labelId, $sha256, $profile->fingerprint(), $pageNo, $found);
+        } catch (\Throwable $e) {
+            $this->log->warning('коды на этикетке распознать не удалось', [
+                'path' => $relativePath,
+                'page' => $pageNo,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        if ($found === []) {
+            if ($this->warnWhenNoCodes) {
+                $this->log->warning('на этикетке не найдено ни одного кода: сканер её не подтвердит', [
+                    'path' => $relativePath,
+                    'page' => $pageNo,
+                ]);
+            }
+
+            return;
+        }
+
+        $this->log->debug('коды распознаны', [
+            'path' => $relativePath,
+            'page' => $pageNo,
+            'codes' => array_map(
+                static fn($c): string => $c->symbology . '=' . $c->display(40),
+                $found,
+            ),
+            'ms' => (int) ((hrtime(true) - $started) / 1_000_000),
+        ]);
     }
 
     /** Поворот, инверсия и приведение растра к точному размеру этикетки. */

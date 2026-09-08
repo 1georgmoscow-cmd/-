@@ -125,6 +125,50 @@ CREATE TABLE IF NOT EXISTS `zpl_labels` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- Коды, распознанные на готовых этикетках
+--
+-- Ради этой таблицы и делалось распознавание: оператор наклеивает этикетку,
+-- сканирует её ручным сканером, а система сверяет считанное с тем, что
+-- действительно напечатано.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `label_codes` (
+    `id`                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `zpl_label_id`        BIGINT UNSIGNED NOT NULL,
+    `pdf_sha256`          CHAR(64)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    `profile_fingerprint` CHAR(16)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    `page_no`             SMALLINT UNSIGNED NOT NULL,
+    -- Как называет символику декодер: QR-Code, CODE-128, EAN-13, DataMatrix.
+    `symbology`           VARCHAR(24)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- Кто распознал: zbar или dmtx.
+    `reader`              VARCHAR(16)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- ИМЕННО VARBINARY. Код «Честного знака» содержит разделители GS (0x1D),
+    -- а QR может нести любые байты. Текстовая колонка с кодировкой отвергла бы
+    -- такое значение или молча его исказила — и сверка со сканером перестала бы работать.
+    `value`               VARBINARY(4096) NOT NULL,
+    `value_sha1`          CHAR(40)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- То же значение без управляющих байтов: часть ручных сканеров выбрасывает GS,
+    -- часть отдаёт как есть. Храним оба вида, чтобы сверка работала при любой настройке.
+    `value_normalized`    VARBINARY(4096) NOT NULL,
+    `normalized_sha1`     CHAR(40)        CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    -- Оценка уверенности от zbar. Низкая на растре, который уедет на принтер,
+    -- означает, что и сканер на складе, скорее всего, код не возьмёт.
+    `quality`             SMALLINT UNSIGNED DEFAULT NULL,
+    -- Где код расположен на этикетке, в точках — для разбора проблем.
+    `box_x`               SMALLINT UNSIGNED DEFAULT NULL,
+    `box_y`               SMALLINT UNSIGNED DEFAULT NULL,
+    `box_w`               SMALLINT UNSIGNED DEFAULT NULL,
+    `box_h`               SMALLINT UNSIGNED DEFAULT NULL,
+    `created_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_code_label_value` (`zpl_label_id`, `value_sha1`),
+    -- Обратное направление сверки: по считанному коду найти этикетку.
+    KEY `idx_code_value` (`value_sha1`),
+    KEY `idx_code_normalized` (`normalized_sha1`),
+    KEY `idx_code_page` (`pdf_sha256`, `profile_fingerprint`, `page_no`),
+    CONSTRAINT `fk_code_label` FOREIGN KEY (`zpl_label_id`) REFERENCES `zpl_labels` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- Настройки сервера, которые нужно проверить
 -- ---------------------------------------------------------------------------
 -- В /etc/mysql/mysql.conf.d/mysqld.cnf:

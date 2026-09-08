@@ -25,7 +25,7 @@ use LabelPrint\Render\ZplLabelBuilder;
 use LabelPrint\Support\Args;
 
 try {
-    $options = Args::parse($argv, ['stdout', 'force', 'help'], ['profile', 'preview', 'config']);
+    $options = Args::parse($argv, ['stdout', 'force', 'codes', 'help'], ['profile', 'preview', 'config']);
 } catch (RuntimeException $e) {
     fwrite(STDERR, $e->getMessage() . "\n");
     exit(1);
@@ -41,6 +41,7 @@ if ($options->has('help') || $options->first() === null) {
       --stdout          вывести ZPL в stdout, не записывая в базу
       --preview=ФАЙЛ    сохранить растр в PBM, чтобы посмотреть глазами
       --force           перерендерить, даже если результат уже в кэше
+      --codes           распознать коды на растре и показать их
       --config=ПУТЬ     альтернативный config.php
 
     TXT;
@@ -62,7 +63,7 @@ if ($absolute === false || !str_starts_with($absolute, $pdfDir . '/')) {
 try {
     // Режим stdout/preview базу не трогает: удобно проверять профиль до развёртывания.
     // Путь тот же самый, что у воркера, включая авто-поворот и подгонку под этикетку.
-    if ($options->has('stdout') || $options->has('preview')) {
+    if ($options->has('stdout') || $options->has('preview') || $options->has('codes')) {
         $pages = $app->renderer()->renderPages($absolute, $profile);
         $builder = new ZplLabelBuilder($app->config->bool('render.verify_roundtrip', true));
 
@@ -81,6 +82,32 @@ try {
                     $bitmap->inkCoverage() * 100,
                     $name,
                 ));
+            }
+
+            if ($options->has('codes')) {
+                $reader = $app->codeReader();
+                $started = hrtime(true);
+                $found = $reader->read($bitmap, $relative);
+                fprintf(
+                    STDERR,
+                    "страница %d: кодов %d за %d мс\n",
+                    $i + 1,
+                    count($found),
+                    (int) ((hrtime(true) - $started) / 1_000_000),
+                );
+                foreach ($found as $code) {
+                    fprintf(
+                        STDERR,
+                        "  %-12s %-6s качество %-4s %s\n",
+                        $code->symbology,
+                        $code->reader,
+                        $code->quality ?? '-',
+                        $code->display(70),
+                    );
+                }
+                if ($found === []) {
+                    fwrite(STDERR, "  на этой странице кодов нет — сканер её не подтвердит\n");
+                }
             }
 
             if ($options->has('stdout')) {

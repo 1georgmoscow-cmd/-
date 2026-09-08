@@ -25,6 +25,7 @@ $app = App::boot($options->value('config'));
 
 $jobs = $app->jobs();
 $labels = $app->labels();
+$codes = $app->codeStore();
 
 if ($options->has('prune')) {
     printf("Удалено осиротевших этикеток: %d\n\n", $labels->pruneOrphans());
@@ -49,6 +50,20 @@ printf("  этикеток:    %s\n", number_format($stats['labels']));
 printf("  объём:       %s МБ\n", number_format($stats['bytes'] / 1048576, 1));
 printf("  средний ZPL: %s байт\n", number_format($stats['avg_bytes']));
 printf("  среднее время рендеринга: %d мс\n", $stats['avg_render_ms']);
+
+$codeStats = $codes->stats();
+echo "\nРаспознанные коды\n";
+printf("  всего кодов: %s\n", number_format($codeStats['codes']));
+printf("  этикеток с кодами: %s из %s\n", number_format($codeStats['labels_with_codes']), number_format($stats['labels']));
+foreach ($codeStats['by_symbology'] as $symbology => $count) {
+    printf("    %-14s %s\n", $symbology, number_format($count));
+}
+if ($stats['labels'] > 0 && $codeStats['labels_with_codes'] < $stats['labels']) {
+    printf(
+        "  \033[33mбез кодов: %s — такие этикетки сканер не подтвердит\033[0m\n",
+        number_format($stats['labels'] - $codeStats['labels_with_codes']),
+    );
+}
 
 if ($options->has('failures')) {
     $failures = $jobs->recentFailures();

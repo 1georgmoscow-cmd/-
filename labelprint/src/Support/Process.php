@@ -20,14 +20,19 @@ final class Process
     /**
      * @param  list<string> $command
      * @param  int          $timeoutSeconds жёсткий предел; по истечении процесс убивается
+     * @param  string|null  $stdin          данные для стандартного ввода
      * @return array{stdout:string,stderr:string,code:int}
      */
-    public static function run(array $command, int $timeoutSeconds = 30, int $maxOutputBytes = 268_435_456): array
-    {
+    public static function run(
+        array $command,
+        int $timeoutSeconds = 30,
+        int $maxOutputBytes = 268_435_456,
+        ?string $stdin = null,
+    ): array {
         $descriptors = [
-            // Явно закрываем стандартный ввод: иначе дочерний процесс может
-            // заблокироваться на чтении унаследованного терминала.
-            0 => ['file', '/dev/null', 'r'],
+            // Без данных стандартный ввод закрываем явно, иначе дочерний процесс
+            // может заблокироваться на чтении унаследованного терминала.
+            0 => $stdin === null ? ['file', '/dev/null', 'r'] : ['pipe', 'r'],
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
         ];
@@ -40,14 +45,26 @@ final class Process
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
 
+        // Запись в stdin тоже неблокирующая и идёт в том же цикле выбора.
+        // Растр этикетки — это 120 КБ, вдвое больше буфера канала: попытка
+        // записать его одним fwrite до начала чтения заблокировала бы нас
+        // ровно так же, как чтение одного канала блокирует другой.
+        $input = $stdin;
+        if ($input !== null) {
+            stream_set_blocking($pipes[0], false);
+        }
+
         $stdout = '';
         $stderr = '';
         $deadline = microtime(true) + max(1, $timeoutSeconds);
         $open = [1 => $pipes[1], 2 => $pipes[2]];
 
-        while ($open !== []) {
+        while ($open !== [] || $input !== null) {
             $remaining = $deadline - microtime(true);
             if ($remaining <= 0) {
+                if ($input !== null && is_resource($pipes[0])) {
+                    fclose($pipes[0]);
+                }
                 self::kill($process, $open);
 
                 throw new \RuntimeException(sprintf(
@@ -58,7 +75,7 @@ final class Process
             }
 
             $read = array_values($open);
-            $write = null;
+            $write = $input !== null ? [$pipes[0]] : null;
             $except = null;
 
             $ready = @stream_select($read, $write, $except, (int) $remaining, 200_000);
@@ -67,6 +84,23 @@ final class Process
             // просто пробуем снова, пока не вышел срок.
             if ($ready === false) {
                 continue;
+            }
+
+            if ($input !== null && $write !== null && $write !== []) {
+                $written = @fwrite($pipes[0], substr($input, 0, 262_144));
+
+                if ($written === false) {
+                    // Программа закрыла ввод, не дочитав: это нормально, например
+                    // когда декодер уже нашёл нужное. Дальше просто читаем вывод.
+                    fclose($pipes[0]);
+                    $input = null;
+                } else {
+                    $input = substr($input, $written);
+                    if ($input === '') {
+                        fclose($pipes[0]);
+                        $input = null;
+                    }
+                }
             }
 
             foreach ($read as $stream) {
@@ -95,6 +129,9 @@ final class Process
                 }
 
                 if (strlen($stdout) > $maxOutputBytes) {
+                    if ($input !== null && is_resource($pipes[0])) {
+                        fclose($pipes[0]);
+                    }
                     self::kill($process, $open);
 
                     throw new \RuntimeException(sprintf(

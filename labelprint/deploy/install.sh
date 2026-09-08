@@ -12,7 +12,8 @@ echo "==> Установка пакетов"
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     php-cli php-mysql php-mbstring php-zip \
-    ghostscript poppler-utils
+    ghostscript poppler-utils mupdf-tools \
+    zbar-tools dmtx-utils
 
 echo "==> Копирование в ${TARGET}"
 mkdir -p "${TARGET}"

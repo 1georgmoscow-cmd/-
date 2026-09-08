@@ -182,6 +182,53 @@ check('pdfinfo (poppler-utils)', static fn(): array => $app->pdfinfo() !== null
     ? ['ok', (string) $app->pdfinfo()]
     : ['warn', 'нет — авто-поворот будет работать по встроенному разбору PDF']);
 
+check('zbarimg (zbar-tools)', static function () use ($app): array {
+    $binary = $app->config->string('zbarimg', '/usr/bin/zbarimg');
+    if (!$app->config->bool('barcode.zbar', true)) {
+        return ['ok', 'распознавание отключено в конфиге'];
+    }
+    if (!is_executable($binary)) {
+        return ['warn', "{$binary} не найден: apt install zbar-tools. "
+            . 'Без него QR и штрихкоды на этикетках распознаваться не будут'];
+    }
+
+    return ['ok', $binary . ' ' . probeVersion($binary, ['--version'])];
+});
+
+check('dmtxread (dmtx-utils)', static function () use ($app): array {
+    if (!$app->config->bool('barcode.dmtx', false)) {
+        return ['ok', 'DataMatrix выключен (около 210 мс на этикетку)'];
+    }
+    $binary = $app->config->string('dmtxread', '/usr/bin/dmtxread');
+    if (!is_executable($binary)) {
+        return ['fail', "включён barcode.dmtx, но {$binary} не найден: apt install dmtx-utils"];
+    }
+
+    return ['ok', $binary . ' ' . probeVersion($binary, ['--version'])];
+});
+
+check('распознавание кодов работает', static function () use ($app): array {
+    $reader = $app->codeReader();
+    if (!$reader->isEnabled()) {
+        return ['ok', 'выключено'];
+    }
+
+    // Настоящая проверка: собираем QR прямо здесь и пробуем его прочитать.
+    $bitmap = \LabelPrint\Barcode\SelfTest::qrBitmap();
+    if ($bitmap === null) {
+        return ['warn', 'эталонный QR недоступен, проверка пропущена'];
+    }
+
+    $codes = $reader->read($bitmap, 'самопроверка');
+    foreach ($codes as $code) {
+        if ($code->value === \LabelPrint\Barcode\SelfTest::QR_VALUE) {
+            return ['ok', 'эталонный QR распознан (' . $code->symbology . ')'];
+        }
+    }
+
+    return ['fail', 'эталонный QR не распознан — проверьте установку zbar-tools'];
+});
+
 check('подключение к MySQL', static function () use ($app): array {
     $app->db()->pdo();
 

@@ -3,11 +3,13 @@ declare(strict_types=1);
 
 namespace LabelPrint;
 
+use LabelPrint\Barcode\CodeReader;
 use LabelPrint\Db\Db;
 use LabelPrint\Model\ProfileRegistry;
 use LabelPrint\Pdf\RasterizerFactory;
 use LabelPrint\Queue\JobRepository;
 use LabelPrint\Render\ZplLabelBuilder;
+use LabelPrint\Storage\CodeRepository;
 use LabelPrint\Storage\LabelRepository;
 use LabelPrint\Storage\PdfFileRepository;
 use LabelPrint\Support\Config;
@@ -24,6 +26,7 @@ final class App
     private ?Log $log = null;
     private ?ProfileRegistry $profiles = null;
     private ?RasterizerFactory $rasterizers = null;
+    private ?CodeReader $codeReader = null;
 
     private function __construct(public readonly Config $config)
     {
@@ -71,6 +74,16 @@ final class App
         return new LabelRepository($this->db());
     }
 
+    public function codeStore(): CodeRepository
+    {
+        return new CodeRepository($this->db());
+    }
+
+    public function codeReader(): CodeReader
+    {
+        return $this->codeReader ??= CodeReader::fromConfig($this->config, $this->log('barcode'));
+    }
+
     public function rasterizers(): RasterizerFactory
     {
         return $this->rasterizers ??= new RasterizerFactory($this->config, $this->log('raster'));
@@ -86,6 +99,9 @@ final class App
             files: $this->files(),
             log: $this->log('render'),
             pdfinfoBinary: $this->pdfinfo(),
+            codes: $this->codeReader(),
+            codeStore: $this->codeStore(),
+            warnWhenNoCodes: $this->config->bool('barcode.warn_when_empty', true),
         );
     }
 
