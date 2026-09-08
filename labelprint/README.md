@@ -236,6 +236,21 @@ SELECT 1 FROM label_codes
 Обратный поиск — по считанному коду найти этикетку — идёт по индексу
 `idx_code_value` / `idx_code_normalized`.
 
+## Встраивание в свой код
+
+Короткая инструкция — [docs/USAGE.md](docs/USAGE.md), рабочий пример —
+[examples/workflow.php](examples/workflow.php). Кратко:
+
+```php
+require '/opt/labelprint/src/bootstrap.php';
+
+$api = LabelPrint\Api::boot();
+
+$label = $api->label('2026/09/ozon-12345.pdf');   // готовый ZPL из MySQL, ~5 мс
+$api->send($label->zpl, '192.168.1.50');          // печать, ~0,5 мс
+$api->verify($label->id, $scanned);               // сверка со сканером после наклейки
+```
+
 ## Как забрать ZPL и напечатать
 
 Готовые этикетки лежат в `zpl_labels`, по строке на страницу:
