@@ -18,12 +18,33 @@ final class PdfInfo
 {
     private function __construct(
         public readonly int $pageCount,
-        /** Ширина первой страницы в пунктах (1/72 дюйма). */
+        /** Ширина первой страницы в пунктах (1/72 дюйма), с учётом /Rotate. */
         public readonly ?float $widthPt,
-        /** Высота первой страницы в пунктах. */
+        /** Высота первой страницы в пунктах, с учётом /Rotate. */
         public readonly ?float $heightPt,
         public readonly bool $encrypted,
+        /** Значение /Rotate: 0, 90, 180 или 270. */
+        public readonly int $rotate = 0,
     ) {
+    }
+
+    /**
+     * Собирает объект, применяя /Rotate к размерам страницы.
+     *
+     * Все растеризаторы (gs, mutool, pdftoppm) учитывают /Rotate сами и выдают уже
+     * повёрнутый растр, а pdfinfo показывает исходный MediaBox и отдельную строку
+     * «Page rot». Если этого не учесть, страница 283x425 с /Rotate 90 считается
+     * портретной, хотя рендерится альбомной, — и авто-поворот срабатывает наоборот.
+     */
+    private static function make(int $pages, ?float $w, ?float $h, bool $encrypted, int $rotate): self
+    {
+        $rotate = (($rotate % 360) + 360) % 360;
+
+        if (in_array($rotate, [90, 270], true) && $w !== null && $h !== null) {
+            [$w, $h] = [$h, $w];
+        }
+
+        return new self($pages, $w, $h, $encrypted, $rotate);
     }
 
     public static function read(string $pdfPath, ?string $pdfinfoBinary = null): self
@@ -64,7 +85,8 @@ final class PdfInfo
     private static function viaPdfinfo(string $pdfPath, string $binary): ?self
     {
         $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-        $process = @proc_open([$binary, $pdfPath], $descriptors, $pipes);
+        // -box добавляет строки MediaBox/CropBox/TrimBox — они точнее «Page size».
+        $process = @proc_open([$binary, '-box', $pdfPath], $descriptors, $pipes);
         if (!is_resource($process)) {
             return null;
         }
@@ -78,7 +100,7 @@ final class PdfInfo
         if ($code !== 0) {
             // Зашифрованный PDF pdfinfo отвергает — это полезный диагноз, а не сбой.
             if (stripos($err, 'encrypted') !== false) {
-                return new self(0, null, null, true);
+                return self::make(0, null, null, true, 0);
             }
 
             return null;
@@ -91,14 +113,20 @@ final class PdfInfo
         if (preg_match('/^Pages:\s+(\d+)/mi', $out, $m) === 1) {
             $pages = (int) $m[1];
         }
-        if (preg_match('/^Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/mi', $out, $m) === 1) {
+        // MediaBox из «pdfinfo -box» точнее, чем «Page size»: последний показывает CropBox,
+        // а Ghostscript по умолчанию рендерит именно MediaBox.
+        if (preg_match('/^MediaBox:\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/mi', $out, $m) === 1) {
+            $width = round(abs((float) $m[3] - (float) $m[1]), 2);
+            $height = round(abs((float) $m[4] - (float) $m[2]), 2);
+        } elseif (preg_match('/^Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/mi', $out, $m) === 1) {
             $width = (float) $m[1];
             $height = (float) $m[2];
         }
 
+        $rotate = preg_match('/^Page rot:\s+(-?\d+)/mi', $out, $m) === 1 ? (int) $m[1] : 0;
         $encrypted = preg_match('/^Encrypted:\s+yes/mi', $out) === 1;
 
-        return $pages > 0 ? new self($pages, $width, $height, $encrypted) : null;
+        return $pages > 0 ? self::make($pages, $width, $height, $encrypted, $rotate) : null;
     }
 
     /** Разбор без внешних утилит: считаем объекты страниц и ищем первый MediaBox. */
@@ -132,7 +160,9 @@ final class PdfInfo
             $height = round(abs((float) $m[4] - (float) $m[2]), 2);
         }
 
-        return new self(max(0, $pages), $width, $height, $encrypted);
+        $rotate = preg_match('/\/Rotate\s+(-?\d+)/', $searchable, $m) === 1 ? (int) $m[1] : 0;
+
+        return self::make(max(0, $pages), $width, $height, $encrypted, $rotate);
     }
 
     /** Распаковывает все FlateDecode-потоки: без этого объекты страниц не видны. */

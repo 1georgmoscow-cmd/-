@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 namespace LabelPrint\Pdf;
 
-use LabelPrint\Model\PrinterProfile;
 use LabelPrint\Support\Log;
 
 /**
@@ -38,28 +37,24 @@ final class Rasterizer
     }
 
     /**
-     * Рендерит все страницы PDF под профиль.
+     * Рендерит все страницы PDF с заданным разрешением.
      *
-     * @param bool $swapGeometry рендерить холст повёрнутым (высота x ширина);
-     *                            нужно, когда растр потом будет повёрнут на 90 или 270
+     * @param float $dpi       разрешение; дробные значения допустимы и используются
+     *                         для вписывания страницы в размер этикетки
+     * @param int   $threshold порог бинаризации 1..254 (для режима с полутоном)
      * @return list<Bitmap> по одному растру на страницу, в порядке страниц
      */
-    public function rasterize(string $pdfPath, PrinterProfile $profile, bool $swapGeometry = false): array
+    public function rasterize(string $pdfPath, float $dpi, int $threshold = 128): array
     {
         if (!is_file($pdfPath) || !is_readable($pdfPath)) {
             throw new \RuntimeException("PDF недоступен для чтения: {$pdfPath}");
         }
 
-        if ($profile->fit === PrinterProfile::FIT_FIT) {
-            $dots = $profile->widthDots() * $profile->heightDots();
-            if ($dots > $this->maxDots) {
-                throw new \RuntimeException(
-                    "Растр этикетки слишком велик: {$dots} точек при лимите {$this->maxDots}",
-                );
-            }
+        if ($dpi <= 0) {
+            throw new \InvalidArgumentException("Разрешение должно быть положительным, задано {$dpi}");
         }
 
-        $command = $this->buildCommand($pdfPath, $profile, $swapGeometry);
+        $command = $this->buildCommand($pdfPath, $dpi);
         $started = hrtime(true);
         [$stdout, $stderr, $exitCode] = $this->run($command);
         $elapsedMs = (int) ((hrtime(true) - $started) / 1_000_000);
@@ -76,7 +71,7 @@ final class Rasterizer
             );
         }
 
-        $pages = $this->splitPages($stdout, $profile);
+        $pages = $this->splitPages($stdout, $threshold);
 
         $this->log->debug('страницы отрендерены', [
             'pdf' => basename($pdfPath),
@@ -93,7 +88,7 @@ final class Rasterizer
      *
      * @return list<Bitmap>
      */
-    private function splitPages(string $stream, PrinterProfile $profile): array
+    private function splitPages(string $stream, int $threshold): array
     {
         $magic = $this->grayscaleThreshold ? 'P5' : 'P4';
         $pages = [];
@@ -120,8 +115,18 @@ final class Rasterizer
 
             $chunk = substr($stream, $offset);
             $bitmap = $this->grayscaleThreshold
-                ? Bitmap::fromPgm($chunk, $profile->threshold)
+                ? Bitmap::fromPgm($chunk, $threshold)
                 : Bitmap::fromPbm($chunk);
+
+            if ($bitmap->width * $bitmap->height > $this->maxDots) {
+                throw new \RuntimeException(sprintf(
+                    'Растр страницы слишком велик: %dx%d = %d точек при лимите %d',
+                    $bitmap->width,
+                    $bitmap->height,
+                    $bitmap->width * $bitmap->height,
+                    $this->maxDots,
+                ));
+            }
 
             $pages[] = $bitmap;
             $offset += $this->consumedBytes($chunk, $bitmap);
@@ -171,9 +176,13 @@ final class Rasterizer
     }
 
     /** @return list<string> */
-    private function buildCommand(string $pdfPath, PrinterProfile $profile, bool $swapGeometry): array
+    private function buildCommand(string $pdfPath, float $dpi): array
     {
-        $args = [
+        // Разрешение может быть дробным: так страница вписывается в этикетку
+        // без -dPDFFitPage и без риска, что Ghostscript развернёт её сам.
+        $resolution = rtrim(rtrim(number_format($dpi, 4, '.', ''), '0'), '.');
+
+        return [
             $this->ghostscript,
             '-q',                        // без баннера
             '-dNOPAUSE',
@@ -183,27 +192,15 @@ final class Rasterizer
             '-sstdout=%stderr',
             '-dNOPROMPT',
             '-sDEVICE=' . ($this->grayscaleThreshold ? 'pgmraw' : 'pbmraw'),
-            '-r' . $profile->dpi,
+            '-r' . $resolution,
+            // На однобитных устройствах эти ключи не действуют вовсе, а на pgmraw дают
+            // субпиксельную точность краёв штрихов — после порога граница встаёт на место.
             '-dTextAlphaBits=' . $this->antialias,
             '-dGraphicsAlphaBits=' . $this->antialias,
             '-sOutputFile=-',            // весь вывод в stdout одним потоком
+            '-f',
+            $pdfPath,
         ];
-
-        if ($profile->fit === PrinterProfile::FIT_FIT) {
-            // Жёстко задаём размер холста в точках и вписываем страницу в него.
-            // -dFIXEDMEDIA не даёт PDF переопределить размер своим MediaBox,
-            // -dPDFFitPage масштабирует страницу с сохранением пропорций.
-            $width = $swapGeometry ? $profile->heightDots() : $profile->widthDots();
-            $height = $swapGeometry ? $profile->widthDots() : $profile->heightDots();
-            $args[] = '-g' . $width . 'x' . $height;
-            $args[] = '-dFIXEDMEDIA';
-            $args[] = '-dPDFFitPage';
-        }
-
-        $args[] = '-f';
-        $args[] = $pdfPath;
-
-        return $args;
     }
 
     /**

@@ -103,13 +103,12 @@ final class RenderService
      */
     public function renderPages(string $absolutePdfPath, PrinterProfile $profile): array
     {
-        $rotation = $this->resolveRotation($absolutePdfPath, $profile);
-        // При повороте на 90/270 холст надо рендерить «лёжа», иначе после поворота
-        // растр не совпадёт с размером этикетки.
-        $swapGeometry = in_array($rotation, [90, 270], true);
+        $info = $this->readInfo($absolutePdfPath);
+        $rotation = self::rotationFor($info, $profile);
+        $dpi = $this->resolveDpi($info, $profile, $rotation);
 
         $pages = [];
-        foreach ($this->rasterizer->rasterize($absolutePdfPath, $profile, $swapGeometry) as $raster) {
+        foreach ($this->rasterizer->rasterize($absolutePdfPath, $dpi, $profile->threshold) as $raster) {
             $pages[] = $this->prepare($raster, $profile, $rotation);
         }
 
@@ -178,6 +177,41 @@ final class RenderService
         return ['pages' => $pageNo, 'bytes' => $totalBytes, 'cached' => false, 'ms' => $ms];
     }
 
+    /**
+     * Разрешение, с которым вызывать Ghostscript.
+     *
+     * В режиме fit страница вписывается в этикетку изменением разрешения, а не
+     * ключом -dPDFFitPage: последний молча доворачивает страницу на 90 градусов,
+     * если так она «лучше вписывается», и вместе с нашим поворотом даёт разворот
+     * на 180. Считая масштаб сами, мы полностью контролируем геометрию.
+     */
+    private function resolveDpi(?PdfInfo $info, PrinterProfile $profile, int $rotation): float
+    {
+        if ($profile->fit !== PrinterProfile::FIT_FIT) {
+            return (float) $profile->dpi;
+        }
+
+        // Холст ДО поворота: при повороте на 90/270 стороны меняются местами.
+        [$canvasWidth, $canvasHeight] = in_array($rotation, [90, 270], true)
+            ? [$profile->heightDots(), $profile->widthDots()]
+            : [$profile->widthDots(), $profile->heightDots()];
+
+        if ($info === null || $info->widthPt === null || $info->heightPt === null
+            || $info->widthPt <= 0 || $info->heightPt <= 0) {
+            // Размер страницы не удалось прочитать: рендерим на разрешении принтера,
+            // а разницу добираем полями или обрезкой в prepare().
+            $this->log->debug('размер страницы неизвестен, вписывание пропущено');
+
+            return (float) $profile->dpi;
+        }
+
+        // Разрешение, при котором страница займёт холст целиком, без искажения пропорций.
+        return min(
+            $canvasWidth * 72 / $info->widthPt,
+            $canvasHeight * 72 / $info->heightPt,
+        );
+    }
+
     /** Поворот, инверсия и приведение растра к точному размеру этикетки. */
     private function prepare(Bitmap $raster, PrinterProfile $profile, int $rotation): Bitmap
     {
@@ -187,37 +221,38 @@ final class RenderService
             $bitmap = $bitmap->invert();
         }
 
-        if ($profile->fit === PrinterProfile::FIT_FIT) {
-            $targetWidth = $profile->widthDots();
-            $targetHeight = $profile->heightDots();
-
-            // После поворота размеры обязаны совпасть с этикеткой; если из-за
-            // округления разошлись на пару точек — дополняем белым, а не масштабируем.
-            if ($bitmap->width !== $targetWidth || $bitmap->height !== $targetHeight) {
-                $bitmap = $bitmap->placeOnCanvas($targetWidth, $targetHeight);
-            }
+        if ($profile->fit !== PrinterProfile::FIT_FIT) {
+            return $bitmap;
         }
 
-        return $bitmap;
+        $targetWidth = $profile->widthDots();
+        $targetHeight = $profile->heightDots();
+
+        if ($bitmap->width === $targetWidth && $bitmap->height === $targetHeight) {
+            return $bitmap;
+        }
+
+        // Центрируем остаток. По горизонтали смещение округляется вниз до кратного 8:
+        // так работает быстрый путь обрезки, копирующий строки целыми байтами.
+        // Цена — сдвиг не больше 7 точек, это 0,9 мм при 203 dpi.
+        $offsetX = intdiv(intdiv($targetWidth - $bitmap->width, 2), 8) * 8;
+        $offsetY = intdiv($targetHeight - $bitmap->height, 2);
+
+        return $bitmap->placeOnCanvas($targetWidth, $targetHeight, $offsetX, $offsetY);
     }
 
     /**
      * Насколько повернуть растр. Помимо явной настройки профиля учитывается
      * несовпадение ориентации страницы и этикетки — этикетки часто приходят «лёжа».
+     *
+     * Метод статический и без побочных эффектов, чтобы решение о повороте можно
+     * было проверить тестами, не запуская Ghostscript.
      */
-    private function resolveRotation(string $absolute, PrinterProfile $profile): int
+    public static function rotationFor(?PdfInfo $info, PrinterProfile $profile): int
     {
         $rotation = $profile->rotate;
 
-        if (!$profile->autoRotate || $profile->fit !== PrinterProfile::FIT_FIT) {
-            return $rotation;
-        }
-
-        try {
-            $info = PdfInfo::read($absolute, $this->pdfinfoBinary);
-        } catch (\Throwable $e) {
-            $this->log->debug('не удалось определить ориентацию страницы', ['error' => $e->getMessage()]);
-
+        if (!$profile->autoRotate || $profile->fit !== PrinterProfile::FIT_FIT || $info === null) {
             return $rotation;
         }
 
@@ -230,11 +265,37 @@ final class RenderService
             return $rotation;
         }
 
-        if ($info->isLandscape() !== $profile->isLandscape()) {
-            $rotation = ($rotation + 90) % 360;
+        if ($info->isLandscape() === $profile->isLandscape()) {
+            return $rotation;
         }
 
-        return $rotation;
+        // Направление доворота выбирается по причине несовпадения.
+        //
+        // Если страница альбомная ИЗ-ЗА /Rotate, значит содержимое было свёрстано
+        // портретным, а producer попросил показывать его повёрнутым. Тогда правильно
+        // ОТМЕНИТЬ этот поворот, а не добавить ещё 90 градусов: иначе этикетка
+        // приезжает вверх ногами. Проверено на PDF с /Rotate 90.
+        //
+        // Если же страница альбомная сама по себе (такой MediaBox), направление
+        // выбрать не из чего — берём поворот по часовой. Когда конкретный поставщик
+        // этикеток кладёт их наоборот, это лечится параметром rotate: 180 в профиле.
+        $step = in_array($info->rotate, [90, 270], true)
+            ? (360 - $info->rotate) % 360
+            : 90;
+
+        return ($rotation + $step) % 360;
+    }
+
+    /** Метаданные страницы; при неудаче возвращает null — рендеринг это переживёт. */
+    private function readInfo(string $absolutePdfPath): ?PdfInfo
+    {
+        try {
+            return PdfInfo::read($absolutePdfPath, $this->pdfinfoBinary);
+        } catch (\Throwable $e) {
+            $this->log->debug('не удалось прочитать метаданные PDF', ['error' => $e->getMessage()]);
+
+            return null;
+        }
     }
 
     private function warnIfSuspicious(string $path, int $pageNo, float $coverage): void
