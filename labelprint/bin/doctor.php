@@ -174,7 +174,13 @@ check('захват задач через SKIP LOCKED', static fn(): array => $a
 check('таблицы схемы', static function () use ($app): array {
     $missing = [];
     foreach (['pdf_files', 'render_jobs', 'zpl_labels'] as $table) {
-        $row = $app->db()->fetchOne('SHOW TABLES LIKE ?', [$table]);
+        // SHOW TABLES LIKE ? не работает с подготовленными выражениями,
+        // поэтому спрашиваем information_schema.
+        $row = $app->db()->fetchOne(
+            'SELECT table_name FROM information_schema.tables
+              WHERE table_schema = DATABASE() AND table_name = ?',
+            [$table],
+        );
         if ($row === null) {
             $missing[] = $table;
         }

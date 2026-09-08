@@ -36,8 +36,8 @@ final class Scanner
         private readonly ProfileRegistry $profiles,
         private readonly Log $log,
         private readonly array $profileCodes,
-        private readonly int $stableChecks = 2,
-        private readonly int $minAgeSeconds = 1,
+        private readonly int $stableChecks = 1,
+        private readonly int $minAgeSeconds = 2,
         private readonly array $extensions = ['pdf'],
         private readonly bool $recursive = true,
         private readonly int $maxAttempts = 3,
@@ -129,8 +129,15 @@ final class Scanner
     }
 
     /**
-     * Файл считается дописанным, если его размер и mtime повторились нужное
-     * число раз подряд и он не изменялся последние min_age_sec секунд.
+     * Файл считается дописанным.
+     *
+     * Основной признак — возраст mtime: запись в файл его обновляет, поэтому
+     * «не менялся последние min_age_sec секунд» отсекает недолитые загрузки.
+     * Этот признак работает и при разовом запуске сканера.
+     *
+     * Дополнительная проверка stable_checks требует нескольких одинаковых
+     * наблюдений подряд. Счётчик живёт в памяти процесса, поэтому имеет смысл
+     * только в режиме --watch; при значении 1 (по умолчанию) он ничего не меняет.
      */
     private function isStable(string $relative, int $size, int $mtime, int $now): bool
     {
@@ -138,12 +145,16 @@ final class Scanner
             return false;
         }
 
+        if ($this->stableChecks <= 1) {
+            return true;
+        }
+
         $prev = $this->pending[$relative] ?? null;
 
         if ($prev === null || $prev['size'] !== $size || $prev['mtime'] !== $mtime) {
             $this->pending[$relative] = ['size' => $size, 'mtime' => $mtime, 'seen' => 1];
 
-            return $this->stableChecks <= 1;
+            return false;
         }
 
         $this->pending[$relative]['seen'] = ++$prev['seen'];

@@ -159,8 +159,12 @@ final class Db
     {
         $version = $this->serverVersion();
 
-        // MariaDB отдаёт версии вида «5.5.5-10.6.12-MariaDB»; SKIP LOCKED там появился в 10.6.
+        // MariaDB часто отдаёт версию с легаси-префиксом: «5.5.5-10.6.12-MariaDB».
+        // Его надо срезать, иначе версия читается как 5.5 и SKIP LOCKED считается
+        // недоступным, хотя он есть. В MariaDB SKIP LOCKED появился в 10.6.
         if (stripos($version, 'mariadb') !== false) {
+            $version = preg_replace('/^5\.5\.5-/', '', $version) ?? $version;
+
             return preg_match('/(\d+)\.(\d+)/', $version, $m) === 1
                 && ((int) $m[1] > 10 || ((int) $m[1] === 10 && (int) $m[2] >= 6));
         }
