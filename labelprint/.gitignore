@@ -1,0 +1,12 @@
+/config/config.php
+/config/printers.php
+/storage/cache/*
+/storage/logs/*
+/storage/tmp/*
+!/storage/cache/.gitkeep
+!/storage/logs/.gitkeep
+!/storage/tmp/.gitkeep
+/db/*.sqlite
+/db/*.sqlite-wal
+/db/*.sqlite-shm
+/tests/fixtures/
