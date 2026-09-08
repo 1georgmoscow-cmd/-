@@ -92,6 +92,37 @@ final class RenderService
     }
 
     /**
+     * Растеризует файл и приводит страницы к готовому для ZPL виду: поворот,
+     * инверсия, точный размер этикетки.
+     *
+     * Вынесено в публичный метод, чтобы предпросмотр в bin/render.php проходил
+     * ровно тот же путь, что и воркер. Иначе предпросмотр показывает не то,
+     * что окажется в базе, и отладка профиля превращается в гадание.
+     *
+     * @return list<Bitmap>
+     */
+    public function renderPages(string $absolutePdfPath, PrinterProfile $profile): array
+    {
+        $rotation = $this->resolveRotation($absolutePdfPath, $profile);
+        // При повороте на 90/270 холст надо рендерить «лёжа», иначе после поворота
+        // растр не совпадёт с размером этикетки.
+        $swapGeometry = in_array($rotation, [90, 270], true);
+
+        $pages = [];
+        foreach ($this->rasterizer->rasterize($absolutePdfPath, $profile, $swapGeometry) as $raster) {
+            $pages[] = $this->prepare($raster, $profile, $rotation);
+        }
+
+        return $pages;
+    }
+
+    /** Абсолютный путь к файлу внутри каталога с PDF. */
+    public function absolutePath(string $relativePath): string
+    {
+        return $this->resolve($relativePath);
+    }
+
+    /**
      * @return array{pages:int,bytes:int,cached:bool,ms:int}
      */
     private function render(
@@ -102,19 +133,13 @@ final class RenderService
         PrinterProfile $profile,
         int $started,
     ): array {
-        $rotation = $this->resolveRotation($absolute, $profile);
-        // При повороте на 90/270 холст надо рендерить «лёжа», иначе после поворота
-        // растр не совпадёт с размером этикетки.
-        $swapGeometry = in_array($rotation, [90, 270], true);
-
-        $pages = $this->rasterizer->rasterize($absolute, $profile, $swapGeometry);
+        $pages = $this->renderPages($absolute, $profile);
 
         $totalBytes = 0;
         $pageNo = 0;
 
-        foreach ($pages as $raster) {
+        foreach ($pages as $bitmap) {
             $pageNo++;
-            $bitmap = $this->prepare($raster, $profile, $rotation);
             $zpl = $this->builder->build($bitmap, $profile);
             $coverage = $bitmap->inkCoverage();
 
@@ -147,7 +172,6 @@ final class RenderService
             'profile' => $profile->code,
             'pages' => $pageNo,
             'zpl_bytes' => $totalBytes,
-            'rotate' => $rotation,
             'ms' => $ms,
         ]);
 

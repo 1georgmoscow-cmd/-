@@ -22,14 +22,16 @@ require __DIR__ . '/../src/bootstrap.php';
 
 use LabelPrint\App;
 use LabelPrint\Render\ZplLabelBuilder;
+use LabelPrint\Support\Args;
 
-$options = getopt('', ['profile:', 'stdout', 'preview:', 'force', 'config:', 'help']);
-$positional = array_values(array_filter(
-    array_slice($argv, 1),
-    static fn(string $arg): bool => !str_starts_with($arg, '--'),
-));
+try {
+    $options = Args::parse($argv, ['stdout', 'force', 'help'], ['profile', 'preview', 'config']);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
 
-if (isset($options['help']) || $positional === []) {
+if ($options->has('help') || $options->first() === null) {
     echo <<<TXT
     Рендеринг одного PDF в ZPL.
 
@@ -42,14 +44,12 @@ if (isset($options['help']) || $positional === []) {
       --config=ПУТЬ     альтернативный config.php
 
     TXT;
-    exit(isset($options['help']) ? 0 : 1);
+    exit($options->has('help') ? 0 : 1);
 }
 
-$app = App::boot(isset($options['config']) ? (string) $options['config'] : null);
-$relative = $positional[0];
-$profile = $app->profiles()->get(
-    isset($options['profile']) ? (string) $options['profile'] : $app->config->string('default_profile'),
-);
+$app = App::boot($options->value('config'));
+$relative = (string) $options->first();
+$profile = $app->profiles()->get($options->value('profile') ?? $app->config->string('default_profile'));
 
 $pdfDir = rtrim($app->config->string('pdf_dir'), '/');
 $absolute = realpath($pdfDir . '/' . $relative);
@@ -61,20 +61,17 @@ if ($absolute === false || !str_starts_with($absolute, $pdfDir . '/')) {
 
 try {
     // Режим stdout/preview базу не трогает: удобно проверять профиль до развёртывания.
-    if (isset($options['stdout']) || isset($options['preview'])) {
-        $pages = $app->rasterizer()->rasterize($absolute, $profile, in_array($profile->rotate, [90, 270], true));
-        $builder = new ZplLabelBuilder();
+    // Путь тот же самый, что у воркера, включая авто-поворот и подгонку под этикетку.
+    if ($options->has('stdout') || $options->has('preview')) {
+        $pages = $app->renderer()->renderPages($absolute, $profile);
+        $builder = new ZplLabelBuilder($app->config->bool('render.verify_roundtrip', true));
 
-        foreach ($pages as $i => $raster) {
-            $bitmap = $profile->rotate !== 0 ? $raster->rotate($profile->rotate) : $raster;
-            if ($profile->invert) {
-                $bitmap = $bitmap->invert();
-            }
-
-            if (isset($options['preview'])) {
+        foreach ($pages as $i => $bitmap) {
+            if ($options->has('preview')) {
+                $target = (string) $options->value('preview');
                 $name = count($pages) > 1
-                    ? preg_replace('/(\.\w+)?$/', '-' . ($i + 1) . '$1', (string) $options['preview'], 1)
-                    : (string) $options['preview'];
+                    ? preg_replace('/(\.[^.\/]+)$/', '-' . ($i + 1) . '$1', $target, 1) ?? $target
+                    : $target;
                 file_put_contents((string) $name, $bitmap->toPbm());
                 fwrite(STDERR, sprintf(
                     "страница %d: %dx%d точек, чёрного %.2f%% -> %s\n",
@@ -86,7 +83,7 @@ try {
                 ));
             }
 
-            if (isset($options['stdout'])) {
+            if ($options->has('stdout')) {
                 echo $builder->build($bitmap, $profile);
             }
         }
@@ -94,7 +91,7 @@ try {
         exit(0);
     }
 
-    $result = $app->renderer()->renderFile($relative, $profile, isset($options['force']));
+    $result = $app->renderer()->renderFile($relative, $profile, $options->has('force'));
 
     printf(
         "%s: %d стр., %s байт ZPL, %d мс%s\n",

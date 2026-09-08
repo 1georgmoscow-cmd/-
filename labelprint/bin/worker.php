@@ -21,10 +21,16 @@ if (PHP_SAPI !== 'cli') {
 require __DIR__ . '/../src/bootstrap.php';
 
 use LabelPrint\App;
+use LabelPrint\Support\Args;
 
-$options = getopt('', ['with-scanner', 'once', 'config:', 'help']);
+try {
+    $options = Args::parse($argv, ['with-scanner', 'once', 'help'], ['config']);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
 
-if (isset($options['help'])) {
+if ($options->has('help')) {
     echo <<<TXT
     Воркер рендеринга PDF -> ZPL.
 
@@ -38,7 +44,7 @@ if (isset($options['help'])) {
 }
 
 try {
-    $app = App::boot(isset($options['config']) ? (string) $options['config'] : null);
+    $app = App::boot($options->value('config'));
 } catch (Throwable $e) {
     fwrite(STDERR, 'Ошибка конфигурации: ' . $e->getMessage() . "\n");
     exit(2);
@@ -47,7 +53,7 @@ try {
 $log = $app->log('worker');
 
 try {
-    if (isset($options['once'])) {
+    if ($options->has('once')) {
         $jobs = $app->jobs();
         $renderer = $app->renderer();
         $profiles = $app->profiles();
@@ -55,7 +61,7 @@ try {
         $done = 0;
         $failed = 0;
 
-        if (isset($options['with-scanner'])) {
+        if ($options->has('with-scanner')) {
             $result = $app->scanner()->scan();
             $log->info('сканирование завершено', $result);
         }
@@ -77,7 +83,7 @@ try {
         exit($failed > 0 ? 1 : 0);
     }
 
-    exit($app->worker(isset($options['with-scanner']))->run());
+    exit($app->worker($options->has('with-scanner'))->run());
 } catch (Throwable $e) {
     $log->error('воркер аварийно завершился', [
         'error' => $e->getMessage(),

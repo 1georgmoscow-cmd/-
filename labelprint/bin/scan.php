@@ -17,20 +17,26 @@ if (PHP_SAPI !== 'cli') {
 require __DIR__ . '/../src/bootstrap.php';
 
 use LabelPrint\App;
+use LabelPrint\Support\Args;
 
-$options = getopt('', ['watch', 'config:', 'help']);
+try {
+    $options = Args::parse($argv, ['watch', 'help'], ['config']);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
 
-if (isset($options['help'])) {
+if ($options->has('help')) {
     echo "Обход каталога с PDF.\n\n  --watch        не выходить, обходить каталог постоянно\n"
         . "  --config=ПУТЬ  альтернативный config.php\n\n";
     exit(0);
 }
 
-$app = App::boot(isset($options['config']) ? (string) $options['config'] : null);
+$app = App::boot($options->value('config'));
 $log = $app->log('scan');
 $scanner = $app->scanner();
 
-if (!isset($options['watch'])) {
+if (!$options->has('watch')) {
     $result = $scanner->scan();
     $log->info('сканирование завершено', $result);
     exit(0);

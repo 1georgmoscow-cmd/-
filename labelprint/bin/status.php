@@ -12,14 +12,21 @@ if (PHP_SAPI !== 'cli') {
 require __DIR__ . '/../src/bootstrap.php';
 
 use LabelPrint\App;
+use LabelPrint\Support\Args;
 
-$options = getopt('', ['failures', 'retry-failed', 'config:']);
-$app = App::boot(isset($options['config']) ? (string) $options['config'] : null);
+try {
+    $options = Args::parse($argv, ['failures', 'retry-failed'], ['config']);
+} catch (RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
+
+$app = App::boot($options->value('config'));
 
 $jobs = $app->jobs();
 $labels = $app->labels();
 
-if (isset($options['retry-failed'])) {
+if ($options->has('retry-failed')) {
     printf("Возвращено в очередь: %d\n\n", $jobs->retryFailed());
 }
 
@@ -38,7 +45,7 @@ printf("  объём:       %s МБ\n", number_format($stats['bytes'] / 1048576,
 printf("  средний ZPL: %s байт\n", number_format($stats['avg_bytes']));
 printf("  среднее время рендеринга: %d мс\n", $stats['avg_render_ms']);
 
-if (isset($options['failures'])) {
+if ($options->has('failures')) {
     $failures = $jobs->recentFailures();
     if ($failures === []) {
         echo "\nОшибок нет.\n";
