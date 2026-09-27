@@ -1,0 +1,3 @@
+.env
+storage/sessions/*
+!storage/sessions/.gitkeep
